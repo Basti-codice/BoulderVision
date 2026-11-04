@@ -1,0 +1,22 @@
+{
+  "name": "bouldervision",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Camera-based hold detection and live climber tracking for climbing walls, with Kilter/Aurora LED board integration.",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview --host",
+    "test": "node --test tests/unit/*.test.js",
+    "e2e": "node tests/e2e/smoke.mjs"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "^1.2.2",
+    "htm": "^3.1.1",
+    "peerjs": "^1.5.5",
+    "preact": "^11.1.1",
+    "qrcode-generator": "^2.0.4",
+    "vite": "^8.3.5"
+  }
+}
