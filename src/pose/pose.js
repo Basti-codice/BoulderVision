@@ -13,39 +13,67 @@ export const SKELETON = [
 export const VARIANTS = ['heavy', 'full', 'lite'];
 
 export class PoseEngine {
-  constructor() { this.lm = null; this.variant = null; this.delegate = null; this.crop = document.createElement('canvas'); this.cctx = this.crop.getContext('2d'); this.lastTs = 0; }
+  constructor() { this.lm = null; this.probe = null; this.variant = null; this.delegate = null; this.crop = document.createElement('canvas'); this.cctx = this.crop.getContext('2d'); this.lastTs = 0; this._fileset = null; }
+
+  async _make(variant, delegate, mode) {
+    this._fileset ??= await FilesetResolver.forVisionTasks(`${BASE}mediapipe`);
+    return PoseLandmarker.createFromOptions(this._fileset, {
+      baseOptions: { modelAssetPath: `${BASE}models/pose_${variant}.task`, delegate },
+      runningMode: mode, numPoses: 2,
+      minPoseDetectionConfidence: 0.25, minPosePresenceConfidence: 0.25, minTrackingConfidence: 0.3, // low on purpose: climbers are often seen from behind
+    });
+  }
 
   async load(variant = 'full') {
     if (this.variant === variant && this.lm) return;
-    const fileset = await FilesetResolver.forVisionTasks(`${BASE}mediapipe`);
-    const make = (delegate) => PoseLandmarker.createFromOptions(fileset, {
-      baseOptions: { modelAssetPath: `${BASE}models/pose_${variant}.task`, delegate },
-      runningMode: 'VIDEO', numPoses: 2,
-      minPoseDetectionConfidence: 0.25, minPosePresenceConfidence: 0.25, minTrackingConfidence: 0.3, // low on purpose: climbers are often seen from behind
-    });
-    let lm, delegate = 'GPU';
-    if (globalThis.__bvForceCpu) delegate = 'CPU'; // diagnostics / headless testing
-    try { lm = await make(delegate); } catch (e) { console.warn('GPU delegate failed, using CPU', e); delegate = 'CPU'; lm = await make('CPU'); }
-    this.lm?.close(); this.lm = lm; this.variant = variant; this.delegate = delegate; this.lastTs = 0;
+    let lm, delegate = globalThis.__bvForceCpu ? 'CPU' : 'GPU'; // CPU override: diagnostics / headless testing
+    try { lm = await this._make(variant, delegate, 'VIDEO'); } catch (e) { console.warn('GPU delegate failed, using CPU', e); delegate = 'CPU'; lm = await this._make(variant, 'CPU', 'VIDEO'); }
+    this.lm?.close(); this.probe?.close(); this.probe = null;
+    this.lm = lm; this.variant = variant; this.delegate = delegate; this.lastTs = 0;
+  }
+
+  /** Second landmarker in still-image mode: lets us try other crop rotations without disturbing the video tracker. */
+  async ensureProbe() {
+    if (this.probe || this._probing || !this.lm) return;
+    this._probing = true;
+    try { this.probe = await this._make(this.variant, this.delegate, 'IMAGE'); } catch (e) { console.warn('probe landmarker unavailable', e); } finally { this._probing = false; }
   }
 
   /**
-   * source: canvas with the full camera frame. roi: {x,y,w,h} in source px (crop around the wall so the model
-   * sees the climber at higher resolution and ignores bystanders). Returns poses with landmarks in
-   * NORMALISED FULL-FRAME coordinates: [{lm:[{x,y,v}x33]}].
+   * source: canvas with the full camera frame. roi: {x,y,w,h} in source px (crop around the wall / the climber so the model
+   * sees the person at higher resolution and ignores bystanders). rot: rotate the crop by 0/90/-90 degrees before
+   * inference (bodies that hang horizontally confuse the model); landmarks are mapped back. useProbe: use the
+   * still-image landmarker. Returns poses with landmarks in NORMALISED FULL-FRAME coordinates: [{lm:[{x,y,v}x33], rot}].
    */
-  detect(source, ts, roi) {
+  detect(source, ts, roi, rot = 0, useProbe = false) {
     const maxSide = 768, k = Math.min(1, maxSide / Math.max(roi.w, roi.h));
-    const cw = Math.max(32, Math.round(roi.w * k)), ch = Math.max(32, Math.round(roi.h * k));
+    const rw = Math.max(32, Math.round(roi.w * k)), rh = Math.max(32, Math.round(roi.h * k));
+    const swap = Math.abs(rot) % 180 !== 0, cw = swap ? rh : rw, ch = swap ? rw : rh;
     if (this.crop.width !== cw || this.crop.height !== ch) { this.crop.width = cw; this.crop.height = ch; }
-    this.cctx.drawImage(source, roi.x, roi.y, roi.w, roi.h, 0, 0, cw, ch);
-    ts = Math.max(ts, this.lastTs + 1); this.lastTs = ts;
-    const res = this.lm.detectForVideo(this.crop, ts);
+    const c = this.cctx, th = (rot * Math.PI) / 180, cos = Math.cos(th), sin = Math.sin(th);
+    c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, cw, ch);
+    c.translate(cw / 2, ch / 2); c.rotate(th);
+    c.drawImage(source, roi.x, roi.y, roi.w, roi.h, -rw / 2, -rh / 2, rw, rh);
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    let res;
+    if (useProbe) { if (!this.probe) return []; res = this.probe.detect(this.crop); }
+    else { ts = Math.max(ts, this.lastTs + 1); this.lastTs = ts; res = this.lm.detectForVideo(this.crop, ts); }
     return (res.landmarks || []).map((pts) => ({
-      lm: pts.map((p) => ({ x: (roi.x + p.x * roi.w) / source.width, y: (roi.y + p.y * roi.h) / source.height, v: Math.min(p.visibility ?? 1, p.presence ?? 1) })),
+      rot,
+      lm: pts.map((p) => {
+        const dx = p.x * cw - cw / 2, dy = p.y * ch - ch / 2;           // inverse of the crop rotation
+        const px = (dx * cos + dy * sin + rw / 2) / rw, py = (-dx * sin + dy * cos + rh / 2) / rh;
+        return { x: (roi.x + px * roi.w) / source.width, y: (roi.y + py * roi.h) / source.height, v: Math.min(p.visibility ?? 1, p.presence ?? 1) };
+      }),
     }));
   }
-  close() { this.lm?.close(); this.lm = null; this.variant = null; }
+  close() { this.lm?.close(); this.probe?.close(); this.lm = null; this.probe = null; this.variant = null; }
+}
+
+/** Mean visibility of hands and feet: how trustworthy the pose is for contact detection. */
+export function limbQuality(lm) {
+  const idx = [15, 16, 19, 20, 27, 28, 31, 32];
+  return idx.reduce((s, i) => s + (lm[i]?.v ?? 0), 0) / idx.length;
 }
 
 /** Pick the climber: prefer the person nearest to the previous one, otherwise the tallest inside the wall. */
@@ -74,7 +102,7 @@ const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
  * Landmarks (normalised frame coords) -> contact points per limb in FRAME PIXELS.
  * swap: exchange left/right (model labelled the climber mirrored). Each limb: array of {x,y} (primary first) or null.
  */
-export function limbPoints(lm, W, H, { swap = false, minVis = 0.3 } = {}) {
+export function limbPoints(lm, W, H, { swap = false, minVis = 0.25 } = {}) {
   const g = (i) => { const p = lm[i]; return p && p.v >= minVis ? { x: p.x * W, y: p.y * H } : null; };
   const hand = (wr, pk, ix) => {
     const a = g(ix), b = g(pk), w = g(wr);

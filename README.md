@@ -40,6 +40,10 @@ you only re-mark the corners (or use **Auto-align with LEDs**) and go live.
 * A hand or foot counts as "on a hold" when its fingertip/toe stays within the contact tolerance of the hold outline
   for about 120 ms and is not just swiping past; it is released after 160 ms away. Short occlusions keep the contact.
 * Only one climber is tracked (the one nearest to the previous position / the tallest inside the wall).
+* Robustness: while no climber is found the app searches the wall in overlapping tiles and tries the image upright and
+  rotated by 90 degrees (horizontal bodies on steep walls confuse the model); once found, a tight crop follows the
+  climber and the rotation is only changed when hands/feet are clearly better visible in another orientation.
+* Hold detection ignores people standing in the picture while the wall is captured (skeleton mask).
 
 ## Output interface
 

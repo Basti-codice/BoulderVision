@@ -10,7 +10,7 @@ import { numberHolds } from '../core/numbering.js';
 import { analyzeWall, detectHolds, fitHoldAt } from '../cv/holds.js';
 import { bitCount, positionsForBit, findSpots, decodeSpots, verifyMapping, brightestSpot } from '../cv/calibrate.js';
 import { AuroraBoard, BleTransport } from '../board/aurora.js';
-import { PoseEngine, pickClimber, limbPoints, SideGuard, VARIANTS } from '../pose/pose.js';
+import { PoseEngine, SKELETON, pickClimber, limbPoints, limbQuality, SideGuard, VARIANTS } from '../pose/pose.js';
 import { Bus, WebSocketSink, SerialSink, KilterSink, SessionRecorder, download } from '../outputs/sinks.js';
 import { PhoneReceiver } from '../core/phone.js';
 import { DemoWorld, DemoPose } from '../sim/demo.js';
@@ -222,11 +222,13 @@ class App {
       await sleep(30);
       await this._storeSnapshot(img);
       this.analysis = analyzeWall(img);
+      this.set({ detect: { ...this.s.detect, message: 'Checking for people in view…' } });
+      const people = await this._findPeople();
       this.set({ detect: { ...this.s.detect, hasAnalysis: true } });
       this._applyDetection(true);
       this.commit();
       const n = this.holds.filter((h) => !h.ghost).length;
-      this.set({ detect: { ...this.s.detect, busy: false, message: n ? `${n} holds found` : 'No holds found. Raise the sensitivity or check the corners.' } });
+      this.set({ detect: { ...this.s.detect, busy: false, message: n ? `${n} holds found${people ? ` (ignored ${people} ${people > 1 ? 'people' : 'person'} in view)` : ''}` : 'No holds found. Raise the sensitivity or check the corners.' } });
     } catch (e) {
       this.set({ detect: { ...this.s.detect, busy: false, message: e.message } }); this.toast(e.message, 'error');
     }
@@ -242,11 +244,48 @@ class App {
     for (const f of found) {
       if (keep.some((k) => pointInPolygon(k.poly, f.cx, f.cy) || pointInPolygon(f.poly, k.cx, k.cy))) continue;
       if (this.suppress.some((s) => Math.hypot(s.x - f.cx, s.y - f.cy) < 1.5 * px)) continue;
+      if (this._inPeople(f.cx, f.cy, px)) continue; // a person was standing there while the wall was captured
       out.push({ id: this.nextId++, ...f, source: 'auto' });
     }
     this.holds = out;
     this._rebind(); this._renumber();
     if (!first) this.saveSoon();
+  }
+  _inPeople(x, y, px) {
+    const r = 11 * px;
+    for (const [ax, ay, bx, by] of this.peopleSegs || []) {
+      const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy, t = l2 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)) : 0;
+      if (Math.hypot(x - (ax + t * dx), y - (ay + t * dy)) < r) return true;
+    }
+    return false;
+  }
+  /** Finds people in the captured frame (skeleton segments in wall px) so they are not mistaken for holds. Best effort. */
+  async _findPeople() {
+    this.peopleSegs = [];
+    if (this.s.demo || !this.source.active || this.source.kind === 'none') return 0;
+    try {
+      if (!this.engine || this.engine instanceof DemoPose) this.engine = new PoseEngine();
+      await this.engine.load(this.engine.variant || 'full');
+      await this.engine.ensureProbe(); for (let i = 0; i < 40 && !this.engine.probe; i++) await sleep(100);
+      if (!this.engine.probe) return 0;
+      const { width: W, height: H } = this.source, c = this.s.corners, xs = c.map((p) => p[0]), ys = c.map((p) => p[1]);
+      const roi = { x: Math.max(0, Math.min(...xs) - 20), y: Math.max(0, Math.min(...ys) - 20), w: 0, h: 0 };
+      roi.w = Math.min(W, Math.max(...xs) + 20) - roi.x; roi.h = Math.min(H, Math.max(...ys) + 20) - roi.y;
+      let best = [], bq = -1;
+      for (const rot of [0, 90, -90]) { // keep the rotation that sees the most body
+        const found = this.engine.detect(this.source.canvas, performance.now(), roi, rot, true).filter((p) => p.lm.filter((q) => q.v > 0.4).length >= 16); // real bodies only, not ghost detections
+        const q = found.reduce((s, p) => s + p.lm.filter((l) => l.v > 0.4).length, 0);
+        if (q > bq) { bq = q; best = found; }
+      }
+      const cen = (p) => { const v = p.lm.filter((q) => q.v > 0.4); return [v.reduce((s, q) => s + q.x, 0) / v.length, v.reduce((s, q) => s + q.y, 0) / v.length]; };
+      best = best.filter((p, i) => best.findIndex((o) => Math.hypot(cen(o)[0] - cen(p)[0], cen(o)[1] - cen(p)[1]) < 0.12) === i); // same person detected twice
+      for (const p of best) {
+        const P = p.lm.map((l) => (l.v > 0.2 ? this.imgToWall(l.x * W, l.y * H) : null));
+        for (const [a, b] of SKELETON) if (P[a] && P[b]) this.peopleSegs.push([...P[a], ...P[b]]);
+        if (P[0]) this.peopleSegs.push([...P[0], ...P[0]]);
+      }
+      return best.length;
+    } catch (e) { console.warn('people mask unavailable', e); return 0; }
   }
   setDetectParam(patch) {
     this.set({ detect: { ...this.s.detect, ...patch } });
@@ -527,8 +566,9 @@ class App {
         await this.engine.load(l.variant === 'auto' ? 'heavy' : l.variant);
       }
       if (token !== this._liveToken) return; // stopped while the model was loading
+      this.engine.ensureProbe?.(); // stateless landmarker used while searching for the climber
       this.tracker = new ContactTracker(this.holds.filter((h) => !h.ghost), this.pxPerCm, { tolCm: l.tolCm });
-      this.filters.clear(); this.prevPerson = null; this.track = null; this._lost = 99; this._tile = -1; this.sideGuard = new SideGuard(); this._lat = 0; this._slow = 0;
+      this.filters.clear(); this.prevPerson = null; this.track = null; this._lost = 99; this._tile = -1; this._rot = 0; this._lowq = 0; this.sideGuard = new SideGuard(); this._lat = 0; this._slow = 0;
       this.recorder.start(performance.now());
       this.source.alwaysFresh = true;
       this.set({ live: { ...this.s.live, loading: false, running: true, activeVariant: this.engine.variant, delegate: this.engine.delegate }, session: { recording: true, events: 0, duration: 0, replayT: null, playing: false, summary: null } });
@@ -579,20 +619,58 @@ class App {
     if (this.track && this._lost < 4) {
       const side = Math.min(Math.max(this.track.size * 1.7, Math.min(wall.w, wall.h) * 0.45), Math.max(wall.w, wall.h));
       const sw = Math.min(side * 1.0, W), sh = Math.min(side * 1.15, H);
-      return { x: Math.max(0, Math.min(W - sw, this.track.cx * W - sw / 2)), y: Math.max(0, Math.min(H - sh, this.track.cy * H - sh / 2)), w: sw, h: sh };
+      return { x: Math.max(0, Math.min(W - sw, this.track.cx * W - sw / 2)), y: Math.max(0, Math.min(H - sh, this.track.cy * H - sh / 2)), w: sw, h: sh, rot: this._rot || 0 };
     }
-    const tw = wall.w * 0.62, th = wall.h * 0.62;
-    const tiles = [wall, { x: wall.x + (wall.w - tw) / 2, y: wall.y + (wall.h - th) / 2, w: tw, h: th }, { x: wall.x, y: wall.y, w: tw, h: th }, { x: wall.x + wall.w - tw, y: wall.y, w: tw, h: th }, { x: wall.x, y: wall.y + wall.h - th, w: tw, h: th }, { x: wall.x + wall.w - tw, y: wall.y + wall.h - th, w: tw, h: th }];
-    return tiles[(this._tile = ((this._tile ?? -1) + 1) % tiles.length)];
+    // searching: whole wall, then overlapping tiles (every candidate is tried in all three rotations by _liveStep)
+    const tw = wall.w * 0.62, th = wall.h * 0.62, centre = { x: wall.x + (wall.w - tw) / 2, y: wall.y + (wall.h - th) / 2, w: tw, h: th };
+    const seq = [wall, centre, { x: wall.x, y: wall.y, w: tw, h: th }, { x: wall.x + wall.w - tw, y: wall.y, w: tw, h: th }, { x: wall.x, y: wall.y + wall.h - th, w: tw, h: th }, { x: wall.x + wall.w - tw, y: wall.y + wall.h - th, w: tw, h: th }];
+    return { ...seq[(this._tile = ((this._tile ?? -1) + 1) % seq.length)], rot: 0 };
+  }
+
+  /** When hands/feet are poorly visible, occasionally test the other crop rotations and switch if one is clearly better. */
+  _probeQuality(now, roi, pose) {
+    if (!this.engine?.ensureProbe) return;
+    const q = limbQuality(pose.lm);
+    this._lowq = q < 0.55 ? (this._lowq || 0) + 1 : 0;
+    if (this._lowq < 8 || now - (this._lastProbe || 0) < 700) return;
+    this._lastProbe = now;
+    this.engine.ensureProbe();
+    let best = { rot: this._rot || 0, q };
+    for (const rot of [0, 90, -90]) {
+      if (rot === (this._rot || 0)) continue;
+      const found = this.engine.detect(this.source.canvas, now, roi, rot, true);
+      const pk = pickClimber(found, this.s.corners.map(([x, y]) => [x / this.source.width, y / this.source.height]), this.prevPerson);
+      if (pk) { const qq = limbQuality(pk.pose.lm); if (qq > best.q + 0.12) best = { rot, q: qq }; }
+    }
+    if (best.rot !== (this._rot || 0)) { this._rot = best.rot; this.track = null; this._lost = 99; this._tile = -1; }
   }
 
   _liveStep(now) {
     const { width: W, height: H } = this.source, c = this.s.corners;
+    const searching = !(this.track && this._lost < 4);
     const roi = this._poseRoi();
     this.poseBusy = true;
     const t0 = performance.now();
     let poses = [];
-    try { poses = this.engine.detect(this.source.canvas, now, roi); } catch (e) { console.warn('pose error', e); }
+    const quad = this.s.corners.map(([x, y]) => [x / W, y / H]);
+    // stateless search over the three rotations; keeps the reading with the best visible hands/feet
+    const searchRot = (r) => {
+      let best = null;
+      for (const rot of [0, 90, -90]) {
+        const pk = pickClimber(this.engine.detect(this.source.canvas, now, r, rot, true), quad, this.prevPerson);
+        if (pk) { const sc = limbQuality(pk.pose.lm) + pk.pose.lm.filter((q) => q.v > 0.3).length * 0.01 + (rot === (this._rot || 0) ? 0.1 : 0); // bias: do not flip rotation for small gains
+          if (!best || sc > best.sc) best = { pose: pk.pose, sc }; }
+      }
+      return best ? [best.pose] : [];
+    };
+    try {
+      if (searching && this.engine.probe) poses = searchRot(roi);
+      else {
+        poses = this.engine.detect(this.source.canvas, now, roi, roi.rot || 0, false);
+        // the video tracker lost the climber: retry this very frame statelessly around the last position
+        if (!poses.length && this.engine.probe) poses = searchRot(roi);
+      }
+    } catch (e) { console.warn('pose error', e); }
     const lat = performance.now() - t0;
     this.poseBusy = false;
     this._lat = this._lat ? this._lat * 0.9 + lat * 0.1 : lat;
@@ -602,6 +680,8 @@ class App {
     let events = [], wallLimbs = { LH: null, RH: null, LF: null, RF: null }, skeleton = null;
     if (pick) {
       this.prevPerson = { cx: pick.cx, cy: pick.cy };
+      this._rot = pick.pose.rot || 0;
+      this._probeQuality(now, roi, pick.pose);
       { const vis = pick.pose.lm.filter((q) => q.v > 0.3), ys2 = vis.map((q) => q.y), xs2 = vis.map((q) => q.x); this.track = { cx: pick.cx, cy: pick.cy, size: Math.max(Math.max(...ys2) - Math.min(...ys2), Math.max(...xs2) - Math.min(...xs2)) * Math.max(W, H) }; this._lost = 0; }
       const lm = pick.pose.lm, auto = this.sideGuard.update(lm, this.s.live.facing), swap = this.s.demo ? false : auto !== this.s.live.swapLR;
       const raw = limbPoints(lm, W, H, { swap });
@@ -732,4 +812,4 @@ class App {
 }
 
 export const app = new App();
-if (typeof window !== 'undefined') window.__bv = app; // handy for the e2e test and the diagnostics page
+if (typeof window !== 'undefined') { window.__bv = app; app._PoseEngine = PoseEngine; } // handy for the e2e test and the diagnostics page
