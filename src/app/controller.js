@@ -43,7 +43,7 @@ class App {
     this.recorder = new SessionRecorder();
     this.analysis = null; this.snapshot = null; this.snapshotBitmap = null; this.snapshotBlob = null;
     this.holds = []; this.suppress = []; this.ignoredLeds = []; this.nextId = 1;
-    this.history = []; this.future = [];
+    this.history = []; this.future = []; this._liveToken = 0;
     this.board = null; this.kilterSink = null; this.world = null;
     this.engine = null; this.tracker = null; this.liveDraw = null; this.sideGuard = new SideGuard();
     this.filters = new Map(); this.prevPerson = null; this.poseBusy = false; this._lat = 0; this._poseFrames = 0; this._poseT = performance.now();
@@ -132,13 +132,12 @@ class App {
     const cam = { ...this.s.cam, ...o };
     let corners = this.s.corners;
     if (corners && this.source.width) {
-      // keep the corner marking on the same physical points when the image is rotated / mirrored
-      if (o.rotation !== undefined) {
-        const steps = ((((o.rotation - this.s.cam.rotation) % 360) + 360) % 360) / 90;
-        let W0 = this.source.width, H0 = this.source.height;
-        for (let i = 0; i < steps; i++) { corners = corners.map(([x, y]) => [H0 - y, x]); [W0, H0] = [H0, W0]; }
-      }
-      if (o.mirror !== undefined && o.mirror !== this.s.cam.mirror) { const w = this.source.width; corners = corners.map(([x, y]) => [w - x, y]); }
+      // display = mirror(rotate(source)). Undo the old mirror, rotate by the delta, apply the new mirror.
+      let W0 = this.source.width, H0 = this.source.height;
+      if (this.s.cam.mirror) corners = corners.map(([x, y]) => [W0 - x, y]);
+      const steps = ((((cam.rotation - this.s.cam.rotation) % 360) + 360) % 360) / 90;
+      for (let i = 0; i < steps; i++) { corners = corners.map(([x, y]) => [H0 - y, x]); [W0, H0] = [H0, W0]; }
+      if (cam.mirror) corners = corners.map(([x, y]) => [W0 - x, y]);
       corners = orderCorners(corners);
     }
     this.set({ cam, corners }); this.source.setOrientation({ rotation: cam.rotation, mirror: cam.mirror });
@@ -175,7 +174,8 @@ class App {
     this.setCorners(this.world.corners.map(([x, y], i) => [x + jit[i][0], y + jit[i][1]]), { save: false });
     this.board = new AuroraBoard(this.world.transport); this.board.delay = 0; this._wireBoard();
     this.holds = []; this.suppress = []; this.ignoredLeds = []; this.history = []; this.future = [];
-    this.set({ holds: [], board: { ...this.s.board, leds: [], scan: { ...this.s.board.scan, result: null, verify: null } }, step: 'align' });
+    this.set({ holds: [], board: { ...this.s.board, leds: [], scan: { ...this.s.board.scan, result: null, verify: null } }, step: 'align', canUndo: false, canRedo: false });
+    this.history.push(this._snap());
     try { await this.board.connect(); } catch (e) { this.toast(e.message, 'error'); }
   }
 
@@ -262,8 +262,12 @@ class App {
   }
   setUi(p) { this.set({ ui: { ...this.s.ui, ...p } }); }
   setNumbering(mode) { this.set({ numbering: mode }); this._renumber(); this.saveSoon(); }
-  _snap() { return { holds: clone(this.holds), suppress: clone(this.suppress), ignoredLeds: [...this.ignoredLeds], nextId: this.nextId }; }
-  _restore(s) { this.holds = clone(s.holds); this.suppress = clone(s.suppress); this.ignoredLeds = [...s.ignoredLeds]; this.nextId = s.nextId; this._renumber(); }
+  _snap() { return { holds: clone(this.holds), suppress: clone(this.suppress), ignoredLeds: [...this.ignoredLeds], nextId: this.nextId, leds: clone(this.s.board.leds) }; }
+  _restore(s) {
+    this.holds = clone(s.holds); this.suppress = clone(s.suppress); this.ignoredLeds = [...s.ignoredLeds]; this.nextId = s.nextId;
+    this.set({ board: { ...this.s.board, leds: clone(s.leds || []) } }); this.board?.setKnownPositions((s.leds || []).map((l) => l.pos));
+    this._renumber();
+  }
   /** Call after a finished edit (not during drags). */
   commit() {
     this.history.push(this._snap()); if (this.history.length > 100) this.history.shift();
@@ -336,18 +340,19 @@ class App {
   _wireBoard() {
     this.board.addEventListener('status', (e) => {
       this.set({ board: { ...this.s.board, state: e.detail.state, name: e.detail.name } });
-      if (e.detail.state === 'disconnected' && this.s.mode === 'live' && this.s.live.running && !this._reconnecting) this._autoReconnect();
+      if (e.detail.state === 'disconnected' && this.s.mode === 'live' && this.s.live.running && !this._reconnecting && !this._manualDisc) this._autoReconnect();
     });
     this.kilterSink = new KilterSink(this.board, (e) => this.toast(`Board: ${e.message}`, 'error'));
     this.kilterSink.enabled = this.s.live.lightBoard;
     this.board.setKnownPositions(this.s.board.leds.map((l) => l.pos));
   }
   async connectBoard() {
+    this._manualDisc = false;
     if (!this.board || this.s.demo) { this.board = new AuroraBoard(new BleTransport()); this._wireBoard(); }
     try { await this.board.connect(); this.toast(`Connected to ${this.board.t.name}`, 'ok'); }
     catch (e) { if (e?.name !== 'NotFoundError') this.toast(e.message || String(e), 'error'); }
   }
-  async disconnectBoard() { try { await this.board?.disconnect(); } catch (e) { this.toast(e.message, 'error'); } }
+  async disconnectBoard() { this._manualDisc = true; try { await this.board?.disconnect(); } catch (e) { this.toast(e.message, 'error'); } }
   async _autoReconnect() {
     this._reconnecting = true;
     for (let i = 0; i < 6 && this.s.live.running; i++) { await sleep(1500 * (i + 1)); try { await this.board.reconnect(); this._reconnecting = false; this.toast('Board reconnected.', 'ok'); return; } catch { /* retry */ } }
@@ -363,7 +368,17 @@ class App {
     return sig;
   }
 
-  async scanLeds() {
+  /** Only one board job (scan / auto-align) at a time; the camera lock taken for it is released afterwards. */
+  async _exclusive(fn) {
+    if (this._busyBoard || this.s.board.scan.running || this.s.board.align.running) { this.toast('Another board operation is still running.'); return; }
+    this._busyBoard = true;
+    const wasLocked = this.s.cam.locked;
+    try { await fn(); } finally { this._busyBoard = false; if (!wasLocked && this.s.cam.locked) await this.lockCamera(false); }
+  }
+  scanLeds() { return this._exclusive(() => this._scanLeds()); }
+  autoAlign() { return this._exclusive(() => this._autoAlign()); }
+
+  async _scanLeds() {
     const sc = (p) => this.set({ board: { ...this.s.board, scan: { ...this.s.board.scan, ...p } } });
     if (!this.board?.connected) { this.toast('Connect the board first.', 'error'); return; }
     if (!this.Himg2wall) { this.toast('Mark the wall corners first.', 'error'); return; }
@@ -430,7 +445,7 @@ class App {
     for (const l of leds) {
       if (used.has(l.pos) || this.ignoredLeds.includes(l.pos)) continue;
       const r = 2 * px;
-      this.holds.push({ id: this.nextId++, cx: l.x, cy: l.y, poly: ellipsePolygon(l.x, l.y, r, r, 8), area: Math.PI * r * r, solidity: 1, diaCm: 4, source: 'led', ghost: true, led: l.pos });
+      this.holds.push({ id: 1e6 + l.pos, cx: l.x, cy: l.y, poly: ellipsePolygon(l.x, l.y, r, r, 8), area: Math.PI * r * r, solidity: 1, diaCm: 4, source: 'led', ghost: true, led: l.pos }); // stable id: selection survives re-binding
     }
   }
 
@@ -443,7 +458,7 @@ class App {
   async lightsOff() { try { await this.board?.allOff(); this.set({ board: { ...this.s.board, testing: null } }); } catch (e) { this.toast(e.message, 'error'); } }
 
   /** Flash known LEDs one by one, find them in the raw image and solve the wall corners from them. */
-  async autoAlign() {
+  async _autoAlign() {
     const al = (p) => this.set({ board: { ...this.s.board, align: { ...this.s.board.align, ...p } } });
     const leds = this.s.board.leds;
     if (!this.board?.connected || leds.length < 8) { this.toast('Needs a connected board and a finished LED scan.', 'error'); return; }
@@ -481,6 +496,7 @@ class App {
         if (errs[worst] < 0.012 * RW || ip.length === 4) break;
         ip = ip.filter((_, i) => i !== worst); wp = wp.filter((_, i) => i !== worst);
       }
+      if (ip.length >= 4) H = solveHomography(ip, wp); // re-solve on the final, outlier-free set
       if (!H || ip.length < 4) throw new Error(`Found only ${imgPts.length} reference LEDs. Check the camera view.`);
       const err = ip.map((p, i) => { const [x, y] = applyH(H, p[0], p[1]); return Math.hypot(x - wp[i][0], y - wp[i][1]); });
       const rmsCm = Math.sqrt(err.reduce((s, e) => s + e * e, 0) / err.length) / this.pxPerCm;
@@ -497,6 +513,8 @@ class App {
 
   // ---------- live ----------
   async startLive() {
+    if (this.s.live.loading || this.s.live.running) return;
+    const token = ++this._liveToken;
     if (!this.source.active) { this.toast('Start a camera first.', 'error'); return; }
     if (!this.Himg2wall) { this.toast('Mark the wall corners first.', 'error'); return; }
     if (!this.holds.some((h) => !h.ghost)) { this.toast('Detect holds first.', 'error'); return; }
@@ -508,6 +526,7 @@ class App {
         if (!this.engine || this.engine instanceof DemoPose) this.engine = new PoseEngine();
         await this.engine.load(l.variant === 'auto' ? 'heavy' : l.variant);
       }
+      if (token !== this._liveToken) return; // stopped while the model was loading
       this.tracker = new ContactTracker(this.holds.filter((h) => !h.ghost), this.pxPerCm, { tolCm: l.tolCm });
       this.filters.clear(); this.prevPerson = null; this.track = null; this._lost = 99; this._tile = -1; this.sideGuard = new SideGuard(); this._lat = 0; this._slow = 0;
       this.recorder.start(performance.now());
@@ -521,9 +540,10 @@ class App {
     }
   }
   async stopLive() {
+    this._liveToken++;
     const now = performance.now();
     this.recorder.stop(now);
-    this.set({ live: { ...this.s.live, running: false, person: false, contacts: { LH: null, RH: null, LF: null, RF: null } }, session: { ...this.s.session, recording: false, duration: this.recorder.duration, events: this.recorder.events.length, summary: this.recorder.summary() } });
+    this.set({ live: { ...this.s.live, loading: false, running: false, person: false, contacts: { LH: null, RH: null, LF: null, RF: null } }, session: { ...this.s.session, recording: false, duration: this.recorder.duration, events: this.recorder.events.length, summary: this.recorder.summary() } });
     if (this.world) this.world.climber = false;
     this.source.alwaysFresh = false;
     this.liveDraw = null;
@@ -620,7 +640,7 @@ class App {
       if (this._slow > 45 && !this._switching) {
         this._switching = true;
         const next = VARIANTS[VARIANTS.indexOf(this.engine.variant) + 1];
-        this.engine.load(next).then(() => { this.set({ live: { ...this.s.live, activeVariant: next } }); this.toast(`Switched to the ${next} pose model to keep the frame rate up.`); }).finally(() => { this._switching = false; this._slow = 0; this._lat = 0; });
+        this.engine.load(next).then(() => { this.set({ live: { ...this.s.live, activeVariant: next } }); this.toast(`Switched to the ${next} pose model to keep the frame rate up.`); }).catch((e) => this.toast(`Could not switch pose model: ${e.message}`, 'error')).finally(() => { this._switching = false; this._slow = 0; this._lat = 0; });
       }
     }
   }

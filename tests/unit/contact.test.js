@@ -52,3 +52,16 @@ test('ghost holds are ignored', () => {
   const frames = []; for (let i = 0; i < 20; i++) frames.push({ LH: at(200, 500) });
   assert.deepEqual(run(tr, frames), []);
 });
+
+test('a release caused by lost tracking does not leave a stale away-timer for the next hold', () => {
+  const tr = new ContactTracker(holds, PX, { lostMs: 300 });
+  const frames = [];
+  for (let i = 0; i < 12; i++) frames.push({ LH: at(200, 500) });      // on hold 1
+  frames.push({ LH: at(200, 560) });                                    // one frame away -> away-timer starts
+  for (let i = 0; i < 14; i++) frames.push({ LH: null });               // lost -> released
+  for (let i = 0; i < 12; i++) frames.push({ LH: at(300, 500) });      // grabs hold 2
+  frames.push({ LH: at(300, 560) });                                    // one jittery frame must not release it
+  frames.push({ LH: at(300, 500) });
+  const ev = run(tr, frames);
+  assert.deepEqual(ev.map((e) => [e.hold, e.on]), [[1, true], [1, false], [2, true]]);
+});

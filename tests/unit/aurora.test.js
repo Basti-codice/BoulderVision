@@ -75,3 +75,20 @@ test('board: retries a failing chunk and slows down', async () => {
   assert.equal(got.length, 1);
   assert.ok(b.delay >= 20);
 });
+
+test('board: a write that fails after delivery is remembered so the next update blacks it out', async () => {
+  const frames = [];
+  const t = new MockTransport((bytes) => frames.push(...decodeStream(bytes)));
+  const b = new AuroraBoard(t);
+  b.delay = 0;
+  await b.connect();
+  await b.setLeds([{ pos: 1, r: 255, g: 0, b: 0 }]);
+  const w = t.write.bind(t);
+  let fail = 3;
+  t.write = async (c) => { await w(c); if (fail-- > 0) throw new Error('no response'); }; // delivered, but the ack failed
+  await assert.rejects(b.setLeds([{ pos: 300, r: 255, g: 0, b: 0 }]));
+  t.write = w;
+  await b.setLeds([{ pos: 5, r: 255, g: 0, b: 0 }]);
+  const last = frames.at(-1).leds.map((l) => [l.pos, l.color]);
+  assert.deepEqual(last, [[1, 0], [5, 0xe0], [300, 0]]);
+});

@@ -116,8 +116,8 @@ export class FrameSource extends EventTarget {
     const ctx = this._target(w, h), cw = this.canvas.width, ch = this.canvas.height;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.translate(cw / 2, ch / 2);
+    if (this.mirror) ctx.scale(-1, 1); // mirror the displayed image left-right, whatever the rotation
     ctx.rotate((this.rotation * Math.PI) / 180);
-    if (this.mirror) ctx.scale(-1, 1);
     ctx.drawImage(src, -w / 2, -h / 2, w, h);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }

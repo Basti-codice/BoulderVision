@@ -85,7 +85,9 @@ export class BleTransport {
       // Some boards advertise only a name: offer name-prefixed devices as a fallback.
       this.device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'Kilter' }, { namePrefix: 'Aurora' }], optionalServices: [UART_SERVICE] });
     }
-    this.device.addEventListener('gattserverdisconnected', () => { this.rx = null; this.onDisconnect(); });
+    if (this._h) this.device.removeEventListener('gattserverdisconnected', this._h);
+    this._h = () => { this.rx = null; this.onDisconnect(); };
+    this.device.addEventListener('gattserverdisconnected', this._h);
   }
   async open() {
     const server = await this.device.gatt.connect();
@@ -121,7 +123,7 @@ export class AuroraBoard extends EventTarget {
   constructor(transport = new BleTransport()) {
     super();
     this.t = transport;
-    this.t.onDisconnect = () => { this.lit = new Map(); this._status('disconnected'); };
+    this.t.onDisconnect = () => { this._status('disconnected'); }; // `lit` is kept: the board may still show those LEDs after a BLE drop
     this.lit = new Map();          // pos -> {r,g,b} we believe is shown
     this.known = new Set();        // all positions we know exist (from calibration)
     this.queue = Promise.resolve();
@@ -134,14 +136,14 @@ export class AuroraBoard extends EventTarget {
 
   async connect() {
     this._status('connecting');
-    try { await this.t.request(); await this.t.open(); this.lit = new Map(); this._status('connected'); }
+    try { await this.t.request(); await this.t.open(); this.lit = new Map(); this.delay = 12; this._status('connected'); }
     catch (e) { this._status(this.t.device ? 'disconnected' : 'idle', e.message); throw e; }
   }
   /** Re-open the already selected device (no picker). */
   async reconnect() {
     if (!this.t.device && !(this.t instanceof MockTransport)) throw new Error('No device selected yet');
     this._status('connecting');
-    try { await this.t.open(); this.lit = new Map(); this._status('connected'); }
+    try { await this.t.open(); this._status('connected'); } // keep `lit`: next update switches stale LEDs off
     catch (e) { this._status('disconnected', e.message); throw e; }
   }
 
@@ -153,6 +155,7 @@ export class AuroraBoard extends EventTarget {
           await this.t.write(bytes.slice(i, i + CHUNK_SIZE));
           if (this.delay) await sleep(this.delay);
         }
+        if (this.delay > 12) this.delay = Math.max(12, this.delay - 4); // recover speed after a transient error
         return;
       } catch (e) {
         if (attempt >= 2 || !this.connected) throw e;
@@ -175,7 +178,8 @@ export class AuroraBoard extends EventTarget {
       for (const pos of this.lit.keys()) if (!next.has(pos)) msg.push({ pos, r: 0, g: 0, b: 0 });
       if (!msg.length) return;
       msg.sort((a, b) => a.pos - b.pos);
-      await this._write(buildMessage(msg));
+      try { await this._write(buildMessage(msg)); }
+      catch (e) { for (const [p, c] of next) this.lit.set(p, c); throw e; } // the board may have received it: remember, so the next update blacks it out
       this.lit = next;
     });
   }

@@ -154,6 +154,7 @@ export function decodeSpots(spots, allSignal, bitSignals, N) {
       conf = Math.min(conf, Math.min(1, Math.abs(r - t) / (sep / 2)));
     });
     const pos = grayInv(code);
+    if (code === 0) conf = Math.min(conf, 0.3); // dark in every pattern: a real LED 0 and glare look the same, so flag it
     if (pos >= N) { rejected.push({ reason: 'out-of-range', x: sp.x, y: sp.y, pos }); return; }
     found.push({ pos, x: sp.x, y: sp.y, conf, area: sp.area, pix: sp.pix });
   });

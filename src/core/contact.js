@@ -59,6 +59,7 @@ export class ContactTracker {
       const st = this.state[limb], pts = limbs[limb];
       if (!pts || !pts.length) {
         if (st.hold !== null && t - st.lastSeen > lostMs) { events.push({ t, limb, hold: st.hold, on: false }); st.hold = null; }
+        st.awaySince = null;
         st.cand = null;
         continue;
       }

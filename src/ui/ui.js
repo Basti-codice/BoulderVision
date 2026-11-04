@@ -133,7 +133,7 @@ function AlignStep() {
       <div class="row"><${Btn} onClick=${() => app.setWall({ wm: 3.6, hm: 3.6 })}>12×12 ft<//><${Btn} onClick=${() => app.setWall({ wm: 2.4, hm: 3.6 })}>8×12 ft<//><${Btn} onClick=${() => app.setWall({ wm: 3, hm: 3 })}>3×3 m<//></div>
     <//>
     ${st.kilter && html`<${Section} title="Auto-align with LEDs" hint="Quick re-setup: flashes a few known LEDs and computes the corners itself. Needs a finished LED scan.">
-      <${Btn} disabled=${!canAuto || st.board.align.running} onClick=${() => app.autoAlign()}>${st.board.align.running ? 'Aligning…' : 'Align automatically'}<//>
+      <${Btn} disabled=${!canAuto || st.board.align.running || st.board.scan.running} onClick=${() => app.autoAlign()}>${st.board.align.running ? 'Aligning…' : 'Align automatically'}<//>
       ${st.board.align.message && html`<p class="hint">${st.board.align.message}</p>`}
     <//>`}
     <${NextBtn} to="holds" disabled=${!st.corners} />
@@ -178,7 +178,7 @@ function BoardStep() {
     <${Section} title="Find LED positions" hint="Every LED lights in a coded pattern while the camera watches. This assigns each hold its LED and takes about a minute. Keep the wall free of people.">
       <label class="field"><span>Highest LED position + 1</span><input type="number" min="8" max="1500" step="1" value=${b.ledCount} onChange=${(e) => app.setLedCount(+e.target.value)} /></label>
       <div class="row"><${Btn} onClick=${() => app.setLedCount(200)}>200<//><${Btn} onClick=${() => app.setLedCount(300)}>300<//><${Btn} onClick=${() => app.setLedCount(500)}>500<//><${Btn} onClick=${() => app.setLedCount(600)}>600<//></div>
-      ${sc.running ? html`<div class="progress"><div style=${{ width: `${Math.round(sc.progress * 100)}%` }}></div></div><p class="hint center">${sc.message}</p><${Btn} kind="wide" onClick=${() => app.cancelScan()}>Cancel<//>` : html`<${Btn} kind="primary wide" disabled=${!connected} onClick=${() => app.scanLeds()}>${b.leds.length ? 'Scan again' : 'Scan LEDs'}<//>`}
+      ${sc.running ? html`<div class="progress"><div style=${{ width: `${Math.round(sc.progress * 100)}%` }}></div></div><p class="hint center">${sc.message}</p><${Btn} kind="wide" onClick=${() => app.cancelScan()}>Cancel<//>` : html`<${Btn} kind="primary wide" disabled=${!connected || b.align.running} onClick=${() => app.scanLeds()}>${b.leds.length ? 'Scan again' : 'Scan LEDs'}<//>`}
       ${!sc.running && sc.message && !res && html`<p class="hint center">${sc.message}</p>`}
       ${res && html`<div class="card"><b>${res.found} LEDs located</b> · ${st.holds.filter((h) => h.led != null && !h.ghost).length} matched to holds
         ${verifyPct != null && html`<div class=${verifyPct >= 97 ? 'ok-t' : 'warn-t'}>Verification: ${verifyPct}% of LEDs behaved as predicted</div>`}
