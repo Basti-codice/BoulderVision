@@ -51,9 +51,20 @@ export class Stage {
     if (mode === 'raw') return { W: this.app.source.width || 1280, H: this.app.source.height || 720 };
     const { RW, RH } = this.app.wallDims; return { W: RW, H: RH };
   }
+  /** Size of the straightened preview shown in the align step. */
+  pipSize() {
+    const { RW, RH } = this.app.wallDims, pw = Math.min(280, this.w * 0.3, (this.h * 0.34 * RW) / RH), ph = pw * (RH / RW);
+    return { pw, ph };
+  }
   view(mode) {
-    const v = this.views[mode], { W, H } = this.content(mode), key = `${W}x${H}x${this.w}x${this.h}`;
-    if (!v.user || v.key !== key) { const pad = mode === 'raw' ? 0.97 : 0.95, k = Math.min(this.w / W, this.h / H) * pad; v.k = k; v.tx = (this.w - W * k) / 2; v.ty = (this.h - H * k) / 2; v.key = key; v.user = false; v.fit = k; }
+    const s = this.store.get(), v = this.views[mode], { W, H } = this.content(mode);
+    // in the align step the preview gets its own strip below the camera image instead of covering corner handles
+    const reserve = mode === 'raw' && s.step === 'align' && s.mode === 'setup' && this.app.Himg2wall ? this.pipSize().ph + 26 : 0;
+    const key = `${W}x${H}x${this.w}x${this.h}x${reserve}`;
+    if (!v.user || v.key !== key) {
+      const pad = mode === 'raw' ? 0.97 : 0.95, availH = this.h - reserve, k = Math.min(this.w / W, availH / H) * pad;
+      v.k = k; v.tx = (this.w - W * k) / 2; v.ty = (availH - H * k) / 2; v.key = key; v.user = false; v.fit = k;
+    }
     return v;
   }
   fit() { this.views.raw.user = this.views.wall.user = false; }
@@ -90,14 +101,9 @@ export class Stage {
     const app = this.app, show = mode === 'raw' && s.step === 'align' && app.Himg2wall && app.source.active && this.pipWarper.ok;
     this.pip.style.display = show ? 'block' : 'none';
     if (!show) return;
-    const { RW, RH } = app.wallDims, pw = Math.min(280, this.w * 0.3), ph = pw * (RH / RW), d = this.dpr;
+    const { RW, RH } = app.wallDims, { pw, ph } = this.pipSize(), d = this.dpr;
     this.pip.style.width = pw + 'px'; this.pip.style.height = ph + 'px';
-    // park the preview in the stage corner that is furthest from the corner handles
-    const v = this.view('raw'), pts = (s.corners || []).map(([x, y]) => this.toScreen(v, x, y)), m = 14;
-    const spots = [[this.w - pw - m, this.h - ph - m], [m, this.h - ph - m], [this.w - pw - m, m + 44], [m, m]];
-    let best = spots[0], bs = Infinity;
-    for (const [x, y] of spots) { const sc = pts.reduce((n, [px, py]) => n + (px > x - 24 && px < x + pw + 24 && py > y - 24 && py < y + ph + 24 ? 1 : 0), 0) * 1e6 + (x === spots[0][0] && y === spots[0][1] ? 0 : 1); if (sc < bs) { bs = sc; best = [x, y]; } }
-    this.pip.style.left = best[0] + 'px'; this.pip.style.top = best[1] + 'px'; this.pip.style.right = 'auto'; this.pip.style.bottom = 'auto';
+    this.pip.style.left = 'auto'; this.pip.style.top = 'auto'; this.pip.style.right = '14px'; this.pip.style.bottom = '10px';
     this.pipGrid.style.display = s.ui.grid ? 'block' : 'none';
     this.pipWarper.render(app.source.canvas, app.source.width, app.source.height, app.Himg2wall, app.wallDims, { k: (pw * d) / RW, tx: 0, ty: 0 }, Math.round(pw * d), Math.round(ph * d));
     this.pipCanvas.style.width = pw + 'px'; this.pipCanvas.style.height = ph + 'px';
