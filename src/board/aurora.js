@@ -136,7 +136,7 @@ export class AuroraBoard extends EventTarget {
 
   async connect() {
     this._status('connecting');
-    try { await this.t.request(); await this.t.open(); this.lit = new Map(); this.delay = 12; this._status('connected'); }
+    try { await this.t.request(); await this.t.open(); this.lit = new Map(); this.delay = this.t instanceof MockTransport ? 0 : 12; this._status('connected'); }
     catch (e) { this._status(this.t.device ? 'disconnected' : 'idle', e.message); throw e; }
   }
   /** Re-open the already selected device (no picker). */

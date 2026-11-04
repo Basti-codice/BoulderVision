@@ -3,6 +3,8 @@ import { Warper } from '../core/warp.js';
 import { applyH, invert3, pointInPolygon } from '../core/geometry.js';
 import { SKELETON } from '../pose/pose.js';
 
+import { ROLES } from '../outputs/lightshow.js';
+const ROLE_CSS = Object.fromEntries(Object.entries(ROLES).map(([k, v]) => [k, v.css]));
 export const LIMB_COL = { LH: '#38bdf8', RH: '#f472b6', LF: '#34d399', RF: '#fbbf24' };
 const CORNER_NAMES = ['TL', 'TR', 'BR', 'BL'];
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -179,6 +181,19 @@ export class Stage {
       }
       if (hit && hit.length) { const [cx, cy] = this.toScreen(v, h.cx, h.cy - Math.sqrt(h.area) * 0.8); ctx.font = '700 11px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = LIMB_COL[hit[0]]; ctx.strokeStyle = 'rgba(0,0,0,.8)'; ctx.lineWidth = 3; const t = hit.join('+'); ctx.strokeText(t, cx, cy); ctx.fillText(t, cx, cy); }
     }
+    // light show preview (what the board is showing) and route roles
+    const lit = app.showLit, route = s.mode === 'setup' && s.step === 'board' ? app.activeRoute : null;
+    if (lit?.size || route) {
+      for (const h of holds) {
+        if (h.ghost) continue;
+        const col = lit?.get(h.id), role = route && h.led != null ? route.roles[h.led] : null;
+        if (!col && !role) continue;
+        const css = col ? `rgb(${col.r},${col.g},${col.b})` : ROLE_CSS[role];
+        ctx.save(); ctx.beginPath(); h.poly.forEach(([x, y], i) => { const p = this.toScreen(v, x, y); i ? ctx.lineTo(...p) : ctx.moveTo(...p); }); ctx.closePath();
+        ctx.shadowColor = css; ctx.shadowBlur = col ? 22 : 14; ctx.fillStyle = css; ctx.globalAlpha = col ? 0.85 : 0.55; ctx.fill(); ctx.globalAlpha = 1; ctx.lineWidth = 3; ctx.strokeStyle = css; ctx.stroke(); ctx.restore();
+        if (role) { const [cx, cy] = this.toScreen(v, h.cx, h.cy - Math.sqrt(h.area) * 0.85); ctx.font = '800 10px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = css; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.lineWidth = 3; const t = role.toUpperCase(); ctx.strokeText(t, cx, cy); ctx.fillText(t, cx, cy); }
+      }
+    }
     // LED dots in the board step
     if (s.mode === 'setup' && s.step === 'board') {
       for (const l of s.board.leds) { const [x, y] = this.toScreen(v, l.x, l.y); ctx.beginPath(); ctx.arc(x, y, 2.6, 0, 7); ctx.fillStyle = l.conf < 0.35 ? '#ffb020' : '#35d07f'; ctx.fill(); }
@@ -275,7 +290,7 @@ export class Stage {
       } else { this.drag = { type: 'region', a: p, tool: s.tool }; this.rect = { a: p, b: p }; }
     } else if (s.mode === 'setup' && s.step === 'board') {
       const hit = app.hitTest(wx, wy);
-      if (hit) { app.select(hit.id); app.testHold(hit.id); }
+      if (hit) { app.select(hit.id); if (s.kilterTab === 'route') app.toggleRouteHold(hit.id); else if (s.kilterTab === 'test') app.testHold(hit.id); }
     }
   }
   onMove(e) {

@@ -15,7 +15,7 @@ npm run dev        # http://localhost:5173  (camera and Bluetooth work on localh
 
 Use **Chrome or Edge** (Web Bluetooth and Web Serial are not available in Firefox/Safari).
 For a hosted copy, build with `npm run build` and serve `dist/` over **HTTPS** (e.g. GitHub Pages).
-The phone-as-camera mode needs the app to be reachable from the phone, so use a hosted HTTPS copy for that.
+For the phone-as-camera mode run `npm run dev:phone` instead (HTTPS with a self-signed certificate, the QR code then points to your laptop's Wi-Fi address) and open the printed https address on the laptop too.
 
 No hardware at hand? Open the app, choose **Camera → Demo → Start demo wall**. It runs the complete workflow with a
 simulated wall, a virtual LED board and a virtual climber.
@@ -32,6 +32,17 @@ simulated wall, a virtual LED board and a virtual climber.
 
 Profiles (one per board) store corners, holds and the LED map in IndexedDB. For a new session with the same board
 you only re-mark the corners (or use **Auto-align with LEDs**) and go live.
+
+## Kilter extras (Board step)
+
+* **Light test**: click a hold, its LED lights.
+* **Routes**: pick a role (start / hand / foot / finish) and click holds; the board shows the route live in Kilter-style
+  colours. Several routes per board, saved with the profile, exportable as JSON. Roles are tied to the LED position,
+  so routes survive re-detecting holds.
+* **Light show**: rainbow, sweeps, sparkle, pulse and a *number walk* that lights holds in numbering order. Plays in the
+  wall view even without a board; the board gets the 36 brightest LEDs per frame (Bluetooth is slow).
+* **Export**: annotated image (PNG with numbered holds), hold list (CSV), hold map (JSON with LED map), and the complete
+  board file (re-importable from the profile menu).
 
 ## Live tracking
 

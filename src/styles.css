@@ -120,3 +120,10 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 
 @media (max-width: 1180px) { .main { grid-template-columns: 290px minmax(0, 1fr) 250px; } .chip em { display: none; } }
 @media (max-width: 900px) { .main { grid-template-columns: 1fr; grid-template-rows: auto 60vh auto; overflow-y: auto; } body { overflow: auto; } .app { height: auto; min-height: 100%; } .panel { border: 0; } .chips { display: none; } }
+
+/* routes */
+.roles { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.roles button { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line2); background: var(--panel2); cursor: pointer; font-weight: 600; }
+.roles button i { width: 12px; height: 12px; border-radius: 50%; background: var(--c); box-shadow: 0 0 8px var(--c); }
+.roles button b { margin-left: auto; font-family: var(--mono); color: var(--muted); font-weight: 600; }
+.roles button.on { border-color: var(--c); background: color-mix(in srgb, var(--c) 16%, var(--panel2)); }

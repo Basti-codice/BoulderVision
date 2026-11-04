@@ -33,5 +33,12 @@ real climber while this was written. Go through this list once and note anything
 
 ## Phone as camera
 
-Needs internet for pairing (PeerJS cloud broker, only for the handshake) and the app served over HTTPS. Not
-tested here.
+The phone must open the app over **HTTPS** (browsers block the camera on plain http) and reach the laptop over Wi-Fi.
+
+1. Start the laptop with `npm run dev:phone` and open the **https** address it prints (accept the certificate warning once).
+2. Camera -> Phone (QR): the address of the laptop in your Wi-Fi is filled in automatically. Click *Create pairing code*.
+3. Scan the QR code with the phone, accept the certificate warning (Advanced -> continue), allow the camera, tap *Start streaming*.
+
+Pairing needs internet (PeerJS cloud broker, only for the handshake); the video then flows directly phone to laptop.
+Windows may ask whether Node.js may use private networks: allow it. Not tested with real devices here.
+Alternative without certificate warning: serve a built copy from a hosted HTTPS address (e.g. GitHub Pages) and enter it as the app address.

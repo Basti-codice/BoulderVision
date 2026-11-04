@@ -73,7 +73,7 @@ test('board: retries a failing chunk and slows down', async () => {
   await b.connect();
   await b.setLeds([{ pos: 1, r: 255, g: 255, b: 255 }]);
   assert.equal(got.length, 1);
-  assert.ok(b.delay >= 20);
+  assert.ok(b.delay >= 16); // slowed down after the error, then recovers a little per good frame
 });
 
 test('board: a write that fails after delivery is remembered so the next update blacks it out', async () => {

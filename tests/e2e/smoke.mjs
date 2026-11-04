@@ -84,6 +84,48 @@ await shot('05-board');
 const lit = await page.evaluate(async () => { const a = window.__bv, h = a.holds.find((x) => x.led != null && !x.ghost); await a.testHold(h.id); const on = [...a.world.lit.keys()]; await a.lightsOff(); return { led: h.led, on, off: [...a.world.lit.keys()] }; });
 check('click-to-light', lit.on.length === 1 && lit.on[0] === lit.led && lit.off.length === 0, JSON.stringify(lit));
 
+// --- exports
+const [dl1] = await Promise.all([page.waitForEvent('download'), page.evaluate(() => window.__bv.exportHoldsCsv())]);
+const csv = fs.readFileSync(await dl1.path(), 'utf8').trim().split('\n');
+const nHolds = await page.evaluate(() => window.__bv.holds.filter((h) => !h.ghost).length);
+check('CSV export has a row per hold', csv.length === nHolds + 1 && csv[0].startsWith('label,id,led'), `${csv.length - 1} rows, header: ${csv[0].slice(0, 30)}`);
+const [dl2] = await Promise.all([page.waitForEvent('download'), page.evaluate(() => window.__bv.exportImage())]);
+const png = fs.readFileSync(await dl2.path());
+check('PNG export is a valid image', png.length > 5000 && png.slice(1, 4).toString() === 'PNG', `${png.length} bytes`);
+fs.writeFileSync(`${SHOTS}/export.png`, png);
+const [dl3] = await Promise.all([page.waitForEvent('download'), page.evaluate(() => window.__bv.exportProfileFile())]);
+const prof = JSON.parse(fs.readFileSync(await dl3.path(), 'utf8'));
+check('board file contains holds, LEDs, wall', prof.format === 'bouldervision-profile' && prof.holds.length >= nHolds && prof.leds.length > 100 && prof.wall.wm > 0, `${prof.holds.length} holds, ${prof.leds.length} LEDs`);
+
+// --- route builder lights the right LEDs in the right colours
+const route = await page.evaluate(async () => {
+  const a = window.__bv; a.setKilterTab('route');
+  const hs = a.holds.filter((h) => h.led != null && !h.ghost).slice(0, 4);
+  const roles = ['start', 'hand', 'foot', 'finish'];
+  for (let i = 0; i < 4; i++) { a.setBrush(roles[i]); a.toggleRouteHold(hs[i].id); }
+  await new Promise((r) => setTimeout(r, 600));
+  const lit = Object.fromEntries(a.world.lit); const expect = hs.map((h) => h.led);
+  const out = { expect, lit: expect.map((l) => lit[l]), size: a.world.lit.size };
+  a.clearRoute(); await new Promise((r) => setTimeout(r, 600)); out.afterClear = a.world.lit.size;
+  return out;
+});
+console.log('   route', JSON.stringify(route));
+check('route: 4 LEDs lit in role colours', route.size === 4 && route.lit.every((c) => c !== undefined && c !== 0) && new Set(route.lit).size === 4);
+check('route: cleared', route.afterClear === 0);
+
+// --- light show
+const show = await page.evaluate(async () => {
+  const a = window.__bv; a.setKilterTab('show'); a.startShow('rainbow'); await new Promise((r) => setTimeout(r, 900));
+  const n = a.world.lit.size, preview = a.showLit?.size || 0; await a.stopShow(); await new Promise((r) => setTimeout(r, 300));
+  return { n, preview, after: a.world.lit.size };
+});
+console.log('   show', JSON.stringify(show));
+check('light show plays on the board (capped) and in the preview', show.n > 5 && show.n <= 36 && show.preview > 20);
+check('light show stops and clears', show.after === 0);
+await page.evaluate(() => { const a = window.__bv; a.setKilterTab('route'); a.setBrush('hand'); const hs = a.holds.filter((h) => h.led != null && !h.ghost); [10, 11, 12, 30, 31, 55, 80].forEach((i, k) => { a.setBrush(['start', 'hand', 'hand', 'foot', 'foot', 'hand', 'finish'][k]); a.toggleRouteHold(hs[i].id); }); a.startShow('sparkle'); });
+await page.waitForTimeout(700); await shot('05b-route-show');
+await page.evaluate(async () => { const a = window.__bv; await a.stopShow(); a.clearRoute(); a.setKilterTab('test'); await a.lightsOff(); });
+
 // --- auto-align: jitter corners then recover from LEDs
 const al = await page.evaluate(async () => {
   const a = window.__bv, truth = a.world.corners;

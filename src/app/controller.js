@@ -11,7 +11,8 @@ import { analyzeWall, detectHolds, fitHoldAt } from '../cv/holds.js';
 import { bitCount, positionsForBit, findSpots, decodeSpots, verifyMapping, brightestSpot } from '../cv/calibrate.js';
 import { AuroraBoard, BleTransport } from '../board/aurora.js';
 import { PoseEngine, SKELETON, pickClimber, limbPoints, limbQuality, SideGuard, VARIANTS } from '../pose/pose.js';
-import { Bus, WebSocketSink, SerialSink, KilterSink, SessionRecorder, download } from '../outputs/sinks.js';
+import { Bus, WebSocketSink, SerialSink, KilterSink, SessionRecorder, download, downloadBlob } from '../outputs/sinks.js';
+import { showFrame, ROLES } from '../outputs/lightshow.js';
 import { PhoneReceiver } from '../core/phone.js';
 import { DemoWorld, DemoPose } from '../sim/demo.js';
 import * as profiles from '../store/profiles.js';
@@ -19,6 +20,7 @@ import * as profiles from '../store/profiles.js';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clone = (o) => structuredClone(o);
 const SETTINGS_KEY = 'bv.settings';
+const MAX_SHOW_LEDS = 36;
 
 export const store = createStore({
   ready: false, profiles: [], profileId: null, profileName: 'My wall', saved: true,
@@ -31,8 +33,9 @@ export const store = createStore({
   live: { running: false, loading: false, variant: 'auto', activeVariant: '', delegate: '', fps: 0, latency: 0, person: false, contacts: { LH: null, RH: null, LF: null, RF: null }, tolCm: 2.5, facing: 'wall', swapLR: false, lightBoard: false, error: '' },
   outputs: { ws: { url: 'ws://localhost:8765', state: 'off', detail: '' }, serial: { state: 'off', detail: '' } },
   session: { recording: false, events: 0, duration: 0, replayT: null, playing: false, summary: null },
-  phone: { state: 'off', url: '', baseUrl: '', detail: '' },
+  phone: { state: 'off', url: '', baseUrl: '', detail: '', lan: null },
   toast: null, ui: { labels: true, grid: true },
+  kilterTab: 'test', show: { running: false, pattern: 'rainbow', speed: 1 }, routes: { items: [], active: null, brush: 'hand', sync: true },
 });
 
 class App {
@@ -51,6 +54,7 @@ class App {
     this.ws = new WebSocketSink((state, detail = '') => this.set({ outputs: { ...this.s.outputs, ws: { ...this.s.outputs.ws, state, detail } } }));
     this.serial = new SerialSink((state, detail = '') => this.set({ outputs: { ...this.s.outputs, serial: { state, detail } } }));
     this.bus.on((m) => { this.recorder.handle(m); this.ws.handle(m); this.serial.handle(m); this.kilterSink?.handle(m); });
+    this.showLit = null;
     this.source.addEventListener('change', () => this._camChanged());
     this._lastUi = 0;
   }
@@ -67,6 +71,7 @@ class App {
       outputs: { ...this.s.outputs, ws: { ...this.s.outputs.ws, url: st.wsUrl || this.s.outputs.ws.url } },
       phone: { ...this.s.phone, baseUrl: st.phoneBase || location.href.replace(/#.*$/, '') },
     });
+    await this._detectLan(st.phoneBase);
     try { this.set({ profiles: await profiles.listProfiles() }); } catch (e) { console.warn('profiles unavailable', e); }
     const last = localStorage.getItem('bv.lastProfile');
     if (last && this.s.profiles.some((p) => p.id === last)) await this.loadProfile(last); else await this.newProfile('My wall', false);
@@ -74,6 +79,16 @@ class App {
     this.refreshDevices();
     const loop = (now) => { this.frame(now); requestAnimationFrame(loop); };
     requestAnimationFrame(loop);
+  }
+  /** Asks the dev server for the Wi-Fi address a phone can use (the QR code must not point to "localhost"). */
+  async _detectLan(saved) {
+    try {
+      const r = await fetch('./__lan', { cache: 'no-store' });
+      if (!r.ok || !(r.headers.get('content-type') || '').includes('json')) return;
+      const lan = await r.json();
+      this.set({ phone: { ...this.s.phone, lan } });
+      if (lan.ips?.length && (!saved || /localhost|127\.0\.0\.1/.test(saved))) this.setPhoneBase(`${lan.protocol}://${lan.ips[0]}:${lan.port}/`);
+    } catch { /* hosted build: no dev server endpoint */ }
   }
   saveSettings() {
     const { cam, live, outputs, phone } = this.s;
@@ -83,6 +98,7 @@ class App {
   // ---------- main loop ----------
   frame(now) {
     const fresh = this.source.tick(now);
+    if (this.s.show.running) this._showTick(now);
     if (fresh && this.s.mode === 'live' && this.s.live.running && this.engine && !this.poseBusy) this._liveStep(now);
   }
 
@@ -554,6 +570,7 @@ class App {
   async startLive() {
     if (this.s.live.loading || this.s.live.running) return;
     const token = ++this._liveToken;
+    if (this.s.show.running) await this.stopShow();
     if (!this.source.active) { this.toast('Start a camera first.', 'error'); return; }
     if (!this.Himg2wall) { this.toast('Mark the wall corners first.', 'error'); return; }
     if (!this.holds.some((h) => !h.ghost)) { this.toast('Detect holds first.', 'error'); return; }
@@ -728,7 +745,7 @@ class App {
   // ---------- outputs ----------
   holdsMessage() {
     const { RW, RH, pxPerCm } = this.wallDims;
-    return { type: 'holds', wall: { widthM: this.s.wall.wm, heightM: this.s.wall.hm }, holds: this.holds.filter((h) => !h.ghost).map((h) => ({ id: h.id, label: h.label, led: h.led ?? null, x: +(h.cx / RW).toFixed(4), y: +(h.cy / RH).toFixed(4), xCm: Math.round(h.cx / pxPerCm), yCm: Math.round((RH - h.cy) / pxPerCm), diaCm: +h.diaCm?.toFixed(1) })) };
+    return { type: 'holds', wall: { widthM: this.s.wall.wm, heightM: this.s.wall.hm }, leds: this.s.board.leds.map((l) => ({ led: l.pos, x: +(l.x / RW).toFixed(4), y: +(l.y / RH).toFixed(4) })), holds: this.holds.filter((h) => !h.ghost).map((h) => ({ id: h.id, label: h.label, led: h.led ?? null, x: +(h.cx / RW).toFixed(4), y: +(h.cy / RH).toFixed(4), xCm: Math.round(h.cx / pxPerCm), yCm: Math.round((RH - h.cy) / pxPerCm), diaCm: +h.diaCm?.toFixed(1) })) };
   }
   connectWs(url) {
     this.set({ outputs: { ...this.s.outputs, ws: { ...this.s.outputs.ws, url } } }); this.saveSettings();
@@ -761,7 +778,7 @@ class App {
   // ---------- profiles ----------
   _profileData() {
     const s = this.s;
-    return { id: s.profileId, name: s.profileName, kilter: s.kilter, wall: s.wall, corners: s.corners, camRotation: s.cam.rotation, camMirror: s.cam.mirror, holds: this.holds, suppress: this.suppress, ignoredLeds: this.ignoredLeds, nextId: this.nextId, numbering: s.numbering, detect: { sensitivity: s.detect.sensitivity, minDia: s.detect.minDia, maxDia: s.detect.maxDia }, ledCount: s.board.ledCount, leds: s.board.leds, snapshot: this.snapshotBlob, holdCount: this.holds.filter((h) => !h.ghost).length };
+    return { id: s.profileId, name: s.profileName, kilter: s.kilter, wall: s.wall, corners: s.corners, camRotation: s.cam.rotation, camMirror: s.cam.mirror, holds: this.holds, suppress: this.suppress, ignoredLeds: this.ignoredLeds, nextId: this.nextId, numbering: s.numbering, detect: { sensitivity: s.detect.sensitivity, minDia: s.detect.minDia, maxDia: s.detect.maxDia }, ledCount: s.board.ledCount, leds: s.board.leds, routes: s.routes.items, snapshot: this.snapshotBlob, holdCount: this.holds.filter((h) => !h.ghost).length };
   }
   saveSoon() { this.set({ saved: false }); clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
   async saveNow() {
@@ -777,6 +794,7 @@ class App {
       profileId: p.id, profileName: p.name, kilter: !!p.kilter, wall: p.wall || { wm: 3.6, hm: 3.6 }, corners: p.corners || this.s.corners, holds: this.holds, numbering: p.numbering || 'rows', selected: null,
       cam: { ...this.s.cam, rotation: p.camRotation || 0, mirror: !!p.camMirror },
       detect: { ...this.s.detect, ...(p.detect || {}), hasAnalysis: false, busy: false, message: '' },
+      routes: { items: p.routes || [], active: p.routes?.[0]?.id ?? null, brush: 'hand', sync: true }, show: { ...this.s.show, running: false }, kilterTab: 'test',
       board: { ...this.s.board, ledCount: p.ledCount || 500, leds: p.leds || [], scan: { ...this.s.board.scan, result: null, verify: null } },
       step: this.source.active ? (p.corners ? 'align' : 'align') : 'camera', mode: 'setup', saved: true, demo: false,
     });
@@ -802,6 +820,109 @@ class App {
   async importProfileFile(file) {
     try { const p = await profiles.importProfile(await file.text()); await profiles.saveProfile(p); this.set({ profiles: await profiles.listProfiles() }); await this.loadProfile(p.id); this.toast('Profile imported.', 'ok'); }
     catch (e) { this.toast(e.message, 'error'); }
+  }
+
+  // ---------- kilter extras: light show, routes, exports ----------
+  setKilterTab(tab) {
+    const prev = this.s.kilterTab;
+    if (prev === tab) return;
+    if (prev === 'show') this.stopShow();
+    if (prev === 'test' || prev === 'route') this.lightsOff();
+    this.set({ kilterTab: tab });
+    if (tab === 'route' && this.s.routes.sync) this._sendRoute();
+  }
+  startShow(pattern) {
+    if (this.s.mode === 'live' && this.s.live.running) return;
+    this.lightsOff();
+    this._showT0 = performance.now(); this._showById = new Map(this.holds.map((h) => [h.id, h]));
+    this.set({ show: { ...this.s.show, running: true, pattern: pattern || this.s.show.pattern } });
+  }
+  async stopShow() {
+    this.set({ show: { ...this.s.show, running: false } });
+    this.showLit = null;
+    try { if (this.board?.connected) await this.board.allOff(); } catch { /* ignore */ }
+  }
+  setShow(patch) { this.set({ show: { ...this.s.show, ...patch } }); if (patch.pattern && this.s.show.running) this._showT0 = performance.now(); }
+  _showTick(now) {
+    const sh = this.s.show, t = ((now - this._showT0) / 1000) * sh.speed;
+    this.showLit = showFrame(sh.pattern, t, this.holds.filter((h) => !h.ghost), this.wallDims);
+    if (this.board?.connected && !this._showBusy && now - (this._showSent || 0) > 140) {
+      this._showSent = now; this._showBusy = true;
+      const leds = [];
+      for (const [id, col] of this.showLit) { const h = this._showById.get(id); if (h?.led != null) leds.push({ pos: h.led, ...col }); }
+      // Bluetooth is slow (20 bytes per packet): send only the brightest LEDs so the animation stays fluid
+      if (leds.length > MAX_SHOW_LEDS) leds.sort((a, b) => Math.max(b.r, b.g, b.b) - Math.max(a.r, a.g, a.b)).length = MAX_SHOW_LEDS;
+      this.board.setLeds(leds).catch(() => {}).finally(() => { this._showBusy = false; });
+    }
+  }
+
+  get activeRoute() { const r = this.s.routes; return r.items.find((i) => i.id === r.active) || null; }
+  _setRoutes(patch) { this.set({ routes: { ...this.s.routes, ...patch } }); this.saveSoon(); }
+  newRoute(name) {
+    const items = this.s.routes.items, id = 'r' + Math.random().toString(36).slice(2, 8);
+    this._setRoutes({ items: [...items, { id, name: name || `Route ${items.length + 1}`, roles: {} }], active: id });
+  }
+  selectRoute(id) { this._setRoutes({ active: id }); if (this.s.kilterTab === 'route' && this.s.routes.sync) this._sendRoute(); }
+  deleteRoute(id) {
+    const items = this.s.routes.items.filter((r) => r.id !== id);
+    this._setRoutes({ items, active: this.s.routes.active === id ? items[0]?.id ?? null : this.s.routes.active });
+    if (this.s.routes.sync) this._sendRoute();
+  }
+  renameRoute(name) { this._setRoutes({ items: this.s.routes.items.map((r) => (r.id === this.s.routes.active ? { ...r, name: name || r.name } : r)) }); }
+  setBrush(brush) { this.set({ routes: { ...this.s.routes, brush } }); }
+  setRouteSync(sync) { this.set({ routes: { ...this.s.routes, sync } }); if (sync) this._sendRoute(); else this.lightsOff(); }
+  /** Roles are keyed by LED position: the physical identity of a hold on the board, stable across re-detection. */
+  toggleRouteHold(holdId) {
+    const h = this.holds.find((x) => x.id === holdId);
+    if (!h || h.ghost) return;
+    if (h.led == null) { this.toast('This hold has no LED yet. Scan the LEDs first.'); return; }
+    if (!this.activeRoute) this.newRoute();
+    const brush = this.s.routes.brush;
+    this._setRoutes({ items: this.s.routes.items.map((r) => { if (r.id !== this.s.routes.active) return r; const roles = { ...r.roles }; if (roles[h.led] === brush) delete roles[h.led]; else roles[h.led] = brush; return { ...r, roles }; }) });
+    if (this.s.routes.sync) this._sendRoute();
+  }
+  clearRoute() { if (!this.activeRoute) return; this._setRoutes({ items: this.s.routes.items.map((r) => (r.id === this.s.routes.active ? { ...r, roles: {} } : r)) }); if (this.s.routes.sync) this._sendRoute(); }
+  _routeLeds() { const r = this.activeRoute; return r ? Object.entries(r.roles).map(([led, role]) => ({ pos: +led, r: ROLES[role].rgb[0], g: ROLES[role].rgb[1], b: ROLES[role].rgb[2] })) : []; }
+  async _sendRoute() {
+    if (!this.board?.connected) return;
+    try { const leds = this._routeLeds(); if (leds.length) await this.board.setLeds(leds); else await this.board.allOff(); } catch (e) { this.toast(e.message, 'error'); }
+  }
+  exportRoutes() {
+    const byLed = new Map(this.holds.filter((h) => h.led != null).map((h) => [h.led, h]));
+    const routes = this.s.routes.items.map((r) => ({ name: r.name, holds: Object.entries(r.roles).map(([led, role]) => ({ led: +led, hold: byLed.get(+led)?.label ?? null, role })) }));
+    download(`${this.s.profileName.replace(/\W+/g, '_')}_routes.json`, JSON.stringify({ format: 'bouldervision-routes', board: this.s.profileName, routes }, null, 1));
+  }
+
+  exportHoldsCsv() {
+    const { RH, pxPerCm } = this.wallDims, rows = this.holds.filter((h) => !h.ghost).slice().sort((a, b) => (a.label ?? 0) - (b.label ?? 0));
+    const csv = ['label,id,led,x_cm_from_left,y_cm_from_bottom,diameter_cm,origin', ...rows.map((h) => [h.label ?? '', h.id, h.led ?? '', (h.cx / pxPerCm).toFixed(1), ((RH - h.cy) / pxPerCm).toFixed(1), (h.diaCm || 0).toFixed(1), h.source].join(','))].join('\n');
+    download(`${this.s.profileName.replace(/\W+/g, '_')}_holds.csv`, csv, 'text/csv');
+  }
+  /** PNG of the straightened wall with every hold outlined and numbered (and LED-only markers dashed). */
+  async exportImage() {
+    const { RW, RH } = this.wallDims, bar = 44, cv = document.createElement('canvas');
+    cv.width = RW; cv.height = RH + bar;
+    const g = cv.getContext('2d');
+    g.fillStyle = '#0b0e12'; g.fillRect(0, 0, RW, RH + bar);
+    try {
+      if (this.snapshotBitmap) g.drawImage(this.snapshotBitmap, 0, 0, RW, RH);
+      else if (this.source.active && this.Himg2wall) { const f = this._rectifyOnce(); g.putImageData(new ImageData(f.data, f.width, f.height), 0, 0); }
+    } catch { /* export without background */ }
+    g.lineJoin = 'round';
+    for (const h of this.holds) {
+      g.beginPath(); h.poly.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.closePath();
+      if (h.ghost) { g.setLineDash([5, 4]); g.strokeStyle = 'rgba(255,255,255,.6)'; g.lineWidth = 1.5; } else { g.setLineDash([]); g.strokeStyle = h.source === 'manual' ? '#a3e635' : '#38bdf8'; g.lineWidth = 2; }
+      g.stroke(); g.setLineDash([]);
+      if (!h.ghost && h.label != null) {
+        const fs = Math.max(11, Math.min(20, Math.sqrt(h.area) * 0.5));
+        g.font = `700 ${fs}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineWidth = 4; g.strokeStyle = 'rgba(0,0,0,.8)'; g.strokeText(String(h.label), h.cx, h.cy); g.fillStyle = '#fff'; g.fillText(String(h.label), h.cx, h.cy);
+      }
+    }
+    g.fillStyle = '#12161c'; g.fillRect(0, RH, RW, bar);
+    g.fillStyle = '#e8edf2'; g.font = '600 18px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle';
+    g.fillText(`${this.s.profileName}  ·  ${this.holds.filter((h) => !h.ghost).length} holds  ·  ${this.s.wall.wm} × ${this.s.wall.hm} m  ·  BoulderVision`, 14, RH + bar / 2);
+    const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
+    downloadBlob(`${this.s.profileName.replace(/\W+/g, '_')}_holds.png`, blob);
   }
 
   // ---------- navigation ----------

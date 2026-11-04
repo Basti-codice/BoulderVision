@@ -7,6 +7,7 @@ import { NUMBERING_MODES } from '../core/numbering.js';
 import { BleTransport } from '../board/aurora.js';
 import { SerialSink } from '../outputs/sinks.js';
 import { qrSvg } from '../core/phone.js';
+import { SHOWS, ROLES } from '../outputs/lightshow.js';
 
 const S = (sel) => useStore(store, sel);
 const STEPS = [
@@ -97,8 +98,11 @@ function CameraStep() {
     </div>`}
     ${tab === 'phone' && html`<div>
       <p class="hint">No cable or app needed. Open the link or scan the QR code with the phone, allow the camera, tap <i>Start streaming</i>. Pairing needs internet; the video goes directly phone to laptop.</p>
-      <label class="field"><span>App address the phone should open</span><input value=${ph.baseUrl} onChange=${(e) => app.setPhoneBase(e.target.value)} /></label>
-      ${/localhost|127\.0\.0\.1/.test(ph.baseUrl) && html`<div class="note warn">A phone cannot open "localhost". Enter the address of the hosted app (HTTPS) here.</div>`}
+      <label class="field"><span>App address the phone should open</span>
+        ${ph.lan?.ips?.length > 1 ? html`<select value=${ph.baseUrl} onChange=${(e) => app.setPhoneBase(e.target.value)}>${ph.lan.ips.map((ip) => html`<option value=${`${ph.lan.protocol}://${ip}:${ph.lan.port}/`}>${ip}</option>`)}<option value=${ph.baseUrl}>${ph.baseUrl}</option></select>` : html`<input value=${ph.baseUrl} onChange=${(e) => app.setPhoneBase(e.target.value)} />`}</label>
+      ${/localhost|127\.0\.0\.1/.test(ph.baseUrl) && html`<div class="note warn">A phone cannot open "localhost". Start the app with <b>npm run dev:phone</b> (the address is filled in automatically) or enter the address of a hosted copy.</div>`}
+      ${!/localhost|127\.0\.0\.1/.test(ph.baseUrl) && ph.baseUrl.startsWith('http:') && html`<div class="note warn">Phones only allow the camera on <b>https</b>. Stop the server and run <b>npm run dev:phone</b>. The phone will show a certificate warning once: choose "Advanced" and continue.</div>`}
+      ${ph.lan && html`<p class="hint">Phone and laptop must be on the same Wi-Fi. If the page does not load, allow Node.js on private networks in the Windows firewall prompt.</p>`}
       ${ph.state === 'off' || ph.state === 'error' ? html`<${Btn} kind="primary wide" onClick=${() => app.startPhone()}>Create pairing code<//>` : html`<div class="qr" dangerouslySetInnerHTML=${{ __html: ph.url ? qrSvg(ph.url) : '' }}></div>`}
       <div class="note">${{ off: '', starting: 'Contacting the pairing server…', 'waiting-broker': 'Contacting the pairing server…', 'waiting-phone': 'Waiting for the phone…', streaming: 'Phone connected.', closed: 'Phone disconnected.', 'broker-lost': 'Pairing server connection lost.', error: `Pairing failed: ${ph.detail}` }[ph.state]}</div>
       ${ph.url && html`<input class="mono small" readonly value=${ph.url} onFocus=${(e) => e.target.select()} />`}
@@ -162,6 +166,42 @@ function HoldsStep() {
       <label class="check"><input type="checkbox" checked=${st.ui.labels} onChange=${(e) => app.setUi({ labels: e.target.checked })} /><span>Show numbers</span></label>
     <//>
     <${NextBtn} to=${st.kilter ? 'board' : 'ready'} disabled=${!n} />
+    <${ExportCard} />
+  </div>`;
+}
+
+function ExportCard() {
+  const st = S((s) => s);
+  const n = st.holds.filter((h) => !h.ghost).length;
+  return html`<${Section} title="Export" hint="Save this board: the wall, every marked hold with its number and LED. The board file can be re-imported from the profile menu.">
+    <div class="row"><${Btn} disabled=${!n} onClick=${() => app.exportImage()}>Image (PNG)<//><${Btn} disabled=${!n} onClick=${() => app.exportHoldsCsv()}>Hold list (CSV)<//></div>
+    <div class="row"><${Btn} disabled=${!n} onClick=${() => app.exportHolds()}>Hold map (JSON)<//><${Btn} onClick=${() => app.exportProfileFile()}>Board file<//></div>
+  <//>`;
+}
+
+function RoutePanel() {
+  const st = S((s) => s);
+  const r = st.routes, active = r.items.find((i) => i.id === r.active), count = active ? Object.keys(active.roles).length : 0;
+  const counts = {}; if (active) for (const role of Object.values(active.roles)) counts[role] = (counts[role] || 0) + 1;
+  return html`<div class="sec">
+    <p class="hint">Pick a role, then click holds in the wall view. Click again to remove. The board shows the route live, like the Kilter app.</p>
+    <div class="roles">${Object.entries(ROLES).map(([k, v]) => html`<button class=${r.brush === k ? 'on' : ''} style=${{ '--c': v.css }} onClick=${() => app.setBrush(k)}><i></i>${v.label}${counts[k] ? html`<b>${counts[k]}</b>` : ''}</button>`)}</div>
+    <div class="row"><select value=${r.active || ''} onChange=${(e) => app.selectRoute(e.target.value)} style="flex:1">${r.items.length ? r.items.map((i) => html`<option value=${i.id}>${i.name}</option>`) : html`<option value="">No route yet</option>`}</select><${Btn} onClick=${() => app.newRoute()}>New<//></div>
+    ${active && html`<label class="field"><span>Name</span><input value=${active.name} onChange=${(e) => app.renameRoute(e.target.value)} /></label>`}
+    <label class="check"><input type="checkbox" checked=${r.sync} onChange=${(e) => app.setRouteSync(e.target.checked)} /><span>Light the route on the board while editing</span></label>
+    <div class="row"><${Btn} disabled=${!count} onClick=${() => app.clearRoute()}>Clear<//><${Btn} disabled=${!active} kind="danger" onClick=${() => confirm('Delete this route?') && app.deleteRoute(active.id)}>Delete<//><${Btn} disabled=${!r.items.length} onClick=${() => app.exportRoutes()}>Export<//></div>
+  </div>`;
+}
+
+function ShowPanel() {
+  const st = S((s) => s);
+  const sh = st.show, connected = st.board.state === 'connected';
+  return html`<div class="sec">
+    <p class="hint">Plays on the board and in the wall view, so you can try it without a board too. Bluetooth is slow, so the board shows the 36 brightest LEDs per frame.</p>
+    <label class="field"><span>Pattern</span><select value=${sh.pattern} onChange=${(e) => app.setShow({ pattern: e.target.value })}>${SHOWS.map((x) => html`<option value=${x.id}>${x.label}</option>`)}</select></label>
+    <${Slider} label="Speed" value=${sh.speed} min=${0.3} max=${3} step=${0.1} fmt=${(v) => `${v.toFixed(1)}×`} onInput=${(v) => app.setShow({ speed: v })} />
+    ${sh.running ? html`<${Btn} kind="danger wide" onClick=${() => app.stopShow()}>Stop<//>` : html`<${Btn} kind="primary wide" disabled=${!st.holds.length} onClick=${() => app.startShow()}>Play${connected ? ' on board' : ''}<//>`}
+    <div class="legend"><span><i style="background:#2aa3ff"></i>hands</span><span><i style="background:#ffa31a"></i>feet</span><span><i style="background:#22e06b"></i>start</span><span><i style="background:#f046ff"></i>finish</span></div>
   </div>`;
 }
 
@@ -182,12 +222,16 @@ function BoardStep() {
       ${!sc.running && sc.message && !res && html`<p class="hint center">${sc.message}</p>`}
       ${res && html`<div class="card"><b>${res.found} LEDs located</b> · ${st.holds.filter((h) => h.led != null && !h.ghost).length} matched to holds
         ${verifyPct != null && html`<div class=${verifyPct >= 97 ? 'ok-t' : 'warn-t'}>Verification: ${verifyPct}% of LEDs behaved as predicted</div>`}
-        ${(res.rejected > 0 || res.uncertain > 0) && html`<div class="warn-t">${res.rejected ? `${res.rejected} unreadable spots ignored` : ''}${res.rejected && res.uncertain ? ', ' : ''}${res.uncertain ? `${res.uncertain} low confidence (amber dots)` : ''}</div>`}
+        ${(res.rejected > Math.max(3, res.found * 0.1) || res.uncertain > 0) && html`<div class="warn-t">${res.rejected > Math.max(3, res.found * 0.1) ? `${res.rejected} unreadable spots ignored` : ''}${res.rejected > Math.max(3, res.found * 0.1) && res.uncertain ? ', ' : ''}${res.uncertain ? `${res.uncertain} low confidence (amber dots)` : ''}</div>`}
         ${st.holds.some((h) => h.ghost) && html`<div class="hint">${st.holds.filter((h) => h.ghost).length} LEDs have no detected hold. They show as dashed circles; use "Add" in Holds if one is real.</div>`}</div>`}
     <//>
-    <${Section} title="Light test" hint="Click any hold in the wall view: its LED lights up on the board. This is the quickest way to confirm the mapping.">
-      <${Btn} disabled=${!connected} onClick=${() => app.lightsOff()}>All lights off<//>
+    <${Section} title="Use the board">
+      <${Seg} value=${st.kilterTab} onChange=${(t) => app.setKilterTab(t)} options=${[{ id: 'test', label: 'Light test' }, { id: 'route', label: 'Routes' }, { id: 'show', label: 'Light show' }]} />
+      ${st.kilterTab === 'test' && html`<div><p class="hint">Click any hold in the wall view: its LED lights up on the board. This is the quickest way to confirm the mapping.</p><${Btn} disabled=${!connected} onClick=${() => app.lightsOff()}>All lights off<//></div>`}
+      ${st.kilterTab === 'route' && html`<${RoutePanel} />`}
+      ${st.kilterTab === 'show' && html`<${ShowPanel} />`}
     <//>
+    <${ExportCard} />
     <${NextBtn} to="ready" />
   </div>`;
 }
@@ -206,7 +250,7 @@ function ReadyStep() {
     <${Section} title="Ready check">${items.map((i) => html`<div class="check-row"><${Dot} state=${i.ok ? 'ok' : i.soft ? 'warn' : 'bad'} /><div><b>${i.t}</b><small>${i.d}</small></div></div>`)}<//>
     <p class="hint">Only one person at a time is tracked. Stand clear of the wall until the skeleton locks on, then climb.</p>
     <${Btn} kind="primary wide big" disabled=${!ready} onClick=${() => app.startLive()}>Start live tracking<//>
-    <${Btn} kind="wide" onClick=${() => app.exportHolds()} disabled=${!n}>Export holds (JSON)<//>
+    <${ExportCard} />
   </div>`;
 }
 
