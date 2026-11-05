@@ -50,6 +50,18 @@ export function runPhoneSender(root, laptopId) {
     <p id="msg" class="muted">Not started.</p>
   </div>`;
   const $ = (s) => root.querySelector(s), video = $('video'), msg = $('#msg');
+  const secure = window.isSecureContext && !!navigator.mediaDevices?.getUserMedia;
+  if (!secure) {
+    $('#go').disabled = true; $('#flip').disabled = true;
+    msg.style.color = '#ff9aa4';
+    msg.innerHTML = `This page was opened over <b>${location.protocol.replace(':', '')}</b>, and phone browsers only allow the camera on <b>https</b>.<br><br>
+      On the laptop: stop the server, run <b>npm run dev:phone</b>, open the printed <b>https</b> address, create a new pairing code and scan it again.
+      The phone shows a certificate warning once: choose Advanced, then continue.`;
+    const info = document.createElement('p'); info.className = 'muted'; info.style.fontSize = '11px'; info.style.wordBreak = 'break-all';
+    info.textContent = `Diagnostics: ${location.href} | secure context: ${window.isSecureContext} | camera API: ${!!navigator.mediaDevices}`;
+    root.querySelector('.phone').appendChild(info);
+    return;
+  }
   let facing = 'environment', stream = null, peer = null, call = null, wake = null;
   const say = (t) => { msg.textContent = t; };
   async function start() {
@@ -61,6 +73,7 @@ export function runPhoneSender(root, laptopId) {
       video.srcObject = stream;
       const s = stream.getVideoTracks()[0].getSettings();
       say(`Camera ${s.width}x${s.height}. Connecting to laptop...`);
+      stream.getVideoTracks()[0].addEventListener('ended', () => say('Camera stopped. Tap Start streaming again.'));
       try { wake = await navigator.wakeLock?.request('screen'); } catch { /* optional */ }
       peer?.destroy();
       peer = new Peer(undefined, { debug: 0 });
