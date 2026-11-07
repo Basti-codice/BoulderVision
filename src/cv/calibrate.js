@@ -1,16 +1,18 @@
 // LED <-> wall-position calibration for Aurora/Kilter boards.
 //
-// Idea: light LEDs in Gray-code bit patterns; every glow spot on the (static) camera image
-// shows a unique on/off sequence = the LED position. ceil(log2 N) pattern frames + one
-// "all on" reference are enough (instead of N frames). All maths here is pure and testable.
+// Row/column scan: every position p is written as p = x + q*y. One pattern per x value lights all LEDs with that x
+// (they are spread far apart over the wall), one pattern per y value lights q consecutive LEDs. Each LED therefore
+// lights up in exactly one x-pattern and one y-pattern; the camera sees which. Never more than ~sqrt(N) LEDs are lit
+// at once (about 30 of 1000), which matters: boards run from small power supplies and dim or reset when many LEDs
+// are on. Decisions are "which pattern is brightest", so no brightness thresholds are needed.
+// All maths here is pure and testable.
 
-export const gray = (p) => p ^ (p >> 1);
-export function grayInv(g) { let n = 0; for (; g; g >>= 1) n ^= g; return n; }
-export const bitCount = (N) => Math.max(1, Math.ceil(Math.log2(Math.max(2, N))));
-export function positionsForBit(N, k) {
-  const out = [];
-  for (let p = 0; p < N; p++) if ((gray(p) >> k) & 1) out.push(p);
-  return out;
+/** Patterns for N LED positions: {q, Q, N, frames:[{axis:'x'|'y', index, positions[]}]}. */
+export function scanLayout(N) {
+  const q = Math.max(2, Math.ceil(Math.sqrt(N))), Q = Math.ceil(N / q), frames = [];
+  for (let i = 0; i < q; i++) { const positions = []; for (let y = 0; y < Q; y++) { const p = i + q * y; if (p < N) positions.push(p); } frames.push({ axis: 'x', index: i, positions }); }
+  for (let j = 0; j < Q; j++) { const positions = []; for (let x = 0; x < q; x++) { const p = x + q * j; if (p < N) positions.push(p); } frames.push({ axis: 'y', index: j, positions }); }
+  return { q, Q, N, frames };
 }
 
 function boxBlurU8(src, w, h, r) {
@@ -109,55 +111,37 @@ export function findSpots(signal, w, h, pxPerCm, { minAbs = 7, sigmaK = 8, nmsCm
 
 const meanOver = (sig, pix) => { let s = 0; for (let k = 0; k < pix.length; k++) s += sig[pix[k]]; return s / pix.length; };
 
-/** Otsu split of ratio values; returns {t, sep}. Falls back to 0.5 when the two groups are not clearly separated. */
-function splitRatios(vals) {
-  const bins = 48, hi = 1.5, hist = new Float64Array(bins);
-  for (const v of vals) hist[Math.max(0, Math.min(bins - 1, Math.floor((v / hi) * bins)))]++;
-  const n = vals.length;
-  let sumAll = 0;
-  for (let k = 0; k < bins; k++) sumAll += k * hist[k];
-  let wB = 0, sumB = 0, best = -1, bt = 0;
-  for (let k = 0; k < bins - 1; k++) {
-    wB += hist[k]; sumB += k * hist[k];
-    const wF = n - wB;
-    if (!wB || !wF) continue;
-    const mB = sumB / wB, mF = (sumAll - sumB) / wF, v = wB * wF * (mB - mF) ** 2;
-    if (v > best) { best = v; bt = k; }
-  }
-  let lo = 0, loN = 0, up = 0, upN = 0;
-  for (const v of vals) { if (v <= ((bt + 1) / bins) * hi) { lo += v; loN++; } else { up += v; upN++; } }
-  const mLo = loN ? lo / loN : 0, mHi = upN ? up / upN : 1, sep = mHi - mLo;
-  if (!(sep > 0.3) || loN < 3 || upN < 3) return { t: 0.5, sep: 1 };
-  return { t: (mLo + mHi) / 2, sep };
+const best2 = (arr, from, to) => {
+  let bi = from, bv = -Infinity, sv = -Infinity;
+  for (let i = from; i < to; i++) { const v = arr[i]; if (v > bv) { sv = bv; bv = v; bi = i; } else if (v > sv) sv = v; }
+  return { index: bi - from, top: bv, second: Math.max(0, sv) };
+};
+
+/** Signal image for spot finding: pixel-wise maximum over the x-patterns (the LEDs lit together there are far apart). */
+export function spotImage(layout, signals) {
+  const out = new Uint8Array(signals[0].length);
+  for (let f = 0; f < layout.q; f++) { const s = signals[f]; for (let i = 0; i < out.length; i++) if (s[i] > out[i]) out[i] = s[i]; }
+  return out;
 }
 
 /**
- * spots: from findSpots(allOnSignal). bitSignals[k]: signal image for bit k pattern.
- * Every spot's brightness in pattern k is compared with its all-on brightness; the on/off threshold is found per
- * pattern from all spots together (so global stray light does not matter).
- * Returns { leds: [{pos,x,y,conf}], rejected: [{reason,x,y,pos?}] }
+ * spots: from findSpots(spotImage(...)). signals[k]: signal image of pattern k (same order as layout.frames).
+ * An LED's x is the x-pattern in which its spot is brightest, y likewise. conf = how much brighter the winner is than the
+ * runner-up (both axes), so a spot that lights in several patterns (glare, neighbour bleed) gets a low confidence.
+ * Returns { leds: [{pos,x,y,conf,pix,ref}], rejected: [{reason,x,y,pos?}] }
  */
-export function decodeSpots(spots, allSignal, bitSignals, N) {
-  const found = [], rejected = [], live = [];
+export function decodeSpots(spots, signals, layout) {
+  const { q, Q, N } = layout, found = [], rejected = [];
   for (const sp of spots) {
-    const iAll = meanOver(allSignal, sp.pix);
-    if (iAll <= 0) { rejected.push({ reason: 'dark', x: sp.x, y: sp.y }); continue; }
-    live.push({ sp, iAll });
+    const iv = signals.map((sig) => meanOver(sig, sp.pix));
+    const bx = best2(iv, 0, q), by = best2(iv, q, q + Q), ref = Math.max(bx.top, by.top);
+    if (ref < 4) { rejected.push({ reason: 'dark', x: sp.x, y: sp.y }); continue; }
+    let conf = Math.min(1 - bx.second / bx.top, 1 - by.second / by.top);
+    if (Math.min(bx.top, by.top) < 0.5 * ref) conf = Math.min(conf, 0.2); // the two axes disagree on brightness
+    const pos = bx.index + q * by.index;
+    if (pos >= N) { rejected.push({ reason: 'out-of-range', x: sp.x, y: sp.y, pos }); continue; }
+    found.push({ pos, x: sp.x, y: sp.y, conf: Math.max(0, conf), area: sp.area, pix: sp.pix, ref });
   }
-  const ratios = bitSignals.map((sig) => live.map(({ sp, iAll }) => meanOver(sig, sp.pix) / iAll));
-  const splits = ratios.map(splitRatios);
-  live.forEach(({ sp }, j) => {
-    let code = 0, conf = 1;
-    bitSignals.forEach((_, k) => {
-      const r = ratios[k][j], { t, sep } = splits[k];
-      if (r > t) code |= 1 << k;
-      conf = Math.min(conf, Math.min(1, Math.abs(r - t) / (sep / 2)));
-    });
-    const pos = grayInv(code);
-    if (code === 0) conf = Math.min(conf, 0.3); // dark in every pattern: a real LED 0 and glare look the same, so flag it
-    if (pos >= N) { rejected.push({ reason: 'out-of-range', x: sp.x, y: sp.y, pos }); return; }
-    found.push({ pos, x: sp.x, y: sp.y, conf, area: sp.area, pix: sp.pix });
-  });
   found.sort((a, b) => b.conf - a.conf);
   const byPos = new Map(), leds = [];
   for (const f of found) {
@@ -169,14 +153,23 @@ export function decodeSpots(spots, allSignal, bitSignals, N) {
   return { leds, rejected };
 }
 
-/** Compare the predicted on/off state of a verification pattern with the measured brightness of every located LED. */
-export function verifyMapping(leds, allSignal, pattern, patternSignal) {
-  const on = new Set(pattern);
-  const ratios = leds.map((l) => meanOver(patternSignal, l.pix) / Math.max(1e-6, meanOver(allSignal, l.pix)));
-  const { t } = splitRatios(ratios);
+/** Choose a sparse, well-spread subset of located LEDs for the verification frame. */
+export function pickVerifySet(leds, count = 36, seed = 1) {
+  let s = seed >>> 0;
+  const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  const pool = leds.slice(), out = [];
+  while (out.length < count && pool.length) out.push(pool.splice(Math.floor(rnd() * pool.length), 1)[0]);
+  return new Set(out.map((l) => l.pos));
+}
+
+/** One sparse pattern lit: every located LED must be on if it was lit and off otherwise. */
+export function verifyMapping(leds, litSet, patternSignal) {
   let ok = 0, bad = 0;
   const wrong = [];
-  leds.forEach((l, i) => { if ((ratios[i] > t) === on.has(l.pos)) ok++; else { bad++; wrong.push(l.pos); } });
+  for (const l of leds) {
+    const on = meanOver(patternSignal, l.pix) / Math.max(1e-6, l.ref) > 0.5;
+    if (on === litSet.has(l.pos)) ok++; else { bad++; wrong.push(l.pos); }
+  }
   return { ok, bad, wrong };
 }
 

@@ -208,3 +208,27 @@ export function isValidQuad(q) {
   }
   return polygonArea(q) > 100;
 }
+
+/**
+ * Holds that touch can end up with overlapping outlines (their hulls overlap). Pull vertices that lie inside a
+ * neighbour back towards their own centre until the outlines separate. Mutates the given holds ({poly, cx, cy}).
+ */
+export function resolveOverlaps(holds, iterations = 12) {
+  const boxes = holds.map((h) => bbox(h.poly));
+  const hit = (a, b) => !(a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0);
+  for (let it = 0; it < iterations; it++) {
+    let changed = false;
+    for (let i = 0; i < holds.length; i++) for (let j = i + 1; j < holds.length; j++) {
+      if (!hit(boxes[i], boxes[j])) continue;
+      for (const [a, b] of [[holds[i], holds[j]], [holds[j], holds[i]]]) {
+        const [cx, cy] = polygonCentroid(a.poly);
+        let moved = false;
+        a.poly = a.poly.map(([x, y]) => { if (!pointInPolygon(b.poly, x, y)) return [x, y]; moved = true; return [cx + (x - cx) * 0.85, cy + (y - cy) * 0.85]; });
+        if (moved) { changed = true; boxes[holds.indexOf(a)] = bbox(a.poly); }
+      }
+    }
+    if (!changed) break;
+  }
+  for (const h of holds) { const [cx, cy] = polygonCentroid(h.poly); h.cx = cx; h.cy = cy; h.area = polygonArea(h.poly); }
+  return holds;
+}

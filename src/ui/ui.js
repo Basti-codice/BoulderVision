@@ -23,6 +23,14 @@ const Slider = ({ label, value, min, max, step = 1, onInput, fmt = (v) => v, lo,
   <input type="range" min=${min} max=${max} step=${step} value=${value} onInput=${(e) => onInput(+e.target.value)} />
   ${(lo || hi) && html`<div class="sl-ends"><span>${lo}</span><span>${hi}</span></div>`}</label>`;
 const Seg = ({ options, value, onChange }) => html`<div class="seg">${options.map((o) => html`<button class=${value === o.id ? 'on' : ''} onClick=${() => onChange(o.id)} title=${o.title || ''}>${o.label}</button>`)}</div>`;
+/** Text/number field that keeps what you type; the value is applied on Enter or when the field loses focus. */
+function EditField({ value, onCommit, type = 'text', ...rest }) {
+  const [text, setText] = useState(String(value ?? ''));
+  const focused = useRef(false);
+  useEffect(() => { if (!focused.current) setText(String(value ?? '')); }, [value]);
+  const commit = () => { focused.current = false; if (text !== String(value ?? '')) onCommit(type === 'number' ? +text : text); };
+  return html`<input type=${type} value=${text} ...${rest} onFocus=${() => { focused.current = true; }} onInput=${(e) => setText(e.target.value)} onBlur=${commit} onKeyDown=${(e) => { if (e.key === 'Enter') e.target.blur(); }} />`;
+}
 const Dot = ({ state }) => html`<i class=${`dot ${state}`}></i>`;
 
 // ---------- header ----------
@@ -58,7 +66,7 @@ function ProfileMenu() {
   return html`<div class="pm">
     <button class="btn ghost" onClick=${() => setOpen(!open)}>${st.profileName}<small>${st.saved ? 'saved' : 'saving…'}</small> ▾</button>
     ${open && html`<div class="menu">
-      <label class="field"><span>Board name</span><input value=${st.profileName} onChange=${(e) => app.renameProfile(e.target.value)} /></label>
+      <label class="field"><span>Board name</span><${EditField} value=${st.profileName} onCommit=${(v) => app.renameProfile(v)} /></label>
       <div class="menu-list">${st.profiles.map((p) => html`<div class=${`menu-item ${p.id === st.profileId ? 'on' : ''}`}><button onClick=${() => { app.loadProfile(p.id); setOpen(false); }}>${p.name}<small>${p.holdCount || 0} holds</small></button>${st.profiles.length > 1 && html`<button class="x" title="Delete" onClick=${() => confirm(`Delete "${p.name}"?`) && app.deleteProfile(p.id)}>✕</button>`}</div>`)}</div>
       <div class="menu-actions">
         <${Btn} onClick=${() => { app.newProfile('New wall'); setOpen(false); }}>New board<//>
@@ -89,17 +97,17 @@ function CameraStep() {
   const insecure = !window.isSecureContext;
   return html`<div class="step-body">
     ${insecure && html`<div class="note warn">Camera and Bluetooth need HTTPS or localhost. This page is served insecurely.</div>`}
-    <${Seg} value=${tab} onChange=${setTab} options=${[{ id: 'cam', label: 'Webcam / USB' }, { id: 'phone', label: 'Phone (QR)' }, { id: 'file', label: 'File' }, { id: 'demo', label: 'Demo' }]} />
+    <${Seg} value=${tab} onChange=${setTab} options=${[{ id: 'cam', label: 'Webcam / Phone app' }, { id: 'phone', label: 'Phone (beta)' }, { id: 'file', label: 'File' }, { id: 'demo', label: 'Demo' }]} />
     ${tab === 'cam' && html`<div>
-      <p class="hint">Works with any device that shows up as a camera: USB webcams, phones in USB-webcam mode, Continuity Camera, DroidCam, Iriun, OBS Virtual Camera.</p>
+      <p class="hint"><b>Recommended for phones:</b> install a free webcam app on the phone and PC (Iriun Webcam, DroidCam, Camo, or Windows 11 Phone Link). The phone then shows up here as a normal camera. Also works: USB webcams, Continuity Camera, OBS Virtual Camera.</p>
       <label class="field"><span>Camera</span><select value=${cam.deviceId} onChange=${(e) => app.useCamera(e.target.value)}><option value="">Default camera</option>${cam.devices.map((d) => html`<option value=${d.id}>${d.label}</option>`)}</select></label>
       <label class="field"><span>Resolution</span><select value=${cam.res} onChange=${(e) => app.setRes(+e.target.value)}><option value="720">720p (fast)</option><option value="1080">1080p (recommended)</option><option value="2160">4K (if supported)</option></select></label>
       <${Btn} kind="primary wide" onClick=${() => app.useCamera()}>${cam.kind === 'camera' ? 'Restart camera' : 'Start camera'}<//>
     </div>`}
     ${tab === 'phone' && html`<div>
-      <p class="hint">No cable or app needed. Open the link or scan the QR code with the phone, allow the camera, tap <i>Start streaming</i>. Pairing needs internet; the video goes directly phone to laptop.</p>
+      <p class="hint"><b>Beta.</b> No app needed, but it needs HTTPS (<i>npm run dev:phone</i>), the same Wi-Fi and internet for pairing. If it does not work, use a webcam app from the first tab instead.</p>
       <label class="field"><span>App address the phone should open</span>
-        ${ph.lan?.ips?.length > 1 ? html`<select value=${ph.baseUrl} onChange=${(e) => app.setPhoneBase(e.target.value)}>${ph.lan.ips.map((ip) => html`<option value=${`${ph.lan.protocol}://${ip}:${ph.lan.port}/`}>${ip}</option>`)}<option value=${ph.baseUrl}>${ph.baseUrl}</option></select>` : html`<input value=${ph.baseUrl} onChange=${(e) => app.setPhoneBase(e.target.value)} />`}</label>
+        ${ph.lan?.ips?.length > 1 ? html`<select value=${ph.baseUrl} onChange=${(e) => app.setPhoneBase(e.target.value)}>${ph.lan.ips.map((ip) => html`<option value=${`${ph.lan.protocol}://${ip}:${ph.lan.port}/`}>${ip}</option>`)}<option value=${ph.baseUrl}>${ph.baseUrl}</option></select>` : html`<${EditField} value=${ph.baseUrl} onCommit=${(v) => app.setPhoneBase(v)} />`}</label>
       ${/localhost|127\.0\.0\.1/.test(ph.baseUrl) && html`<div class="note warn">A phone cannot open "localhost". Start the app with <b>npm run dev:phone</b> (the address is filled in automatically) or enter the address of a hosted copy.</div>`}
       ${!/localhost|127\.0\.0\.1/.test(ph.baseUrl) && ph.baseUrl.startsWith('http:') && html`<div class="note warn">Phones only allow the camera on <b>https</b>. Stop the server and run <b>npm run dev:phone</b>. The phone will show a certificate warning once: choose "Advanced" and continue.</div>`}
       ${ph.lan && html`<p class="hint">Phone and laptop must be on the same Wi-Fi. If the page does not load, allow Node.js on private networks in the Windows firewall prompt.</p>`}
@@ -163,6 +171,8 @@ function HoldsStep() {
     <//>
     <${Section} title="Numbering">
       <label class="field"><select value=${st.numbering} onChange=${(e) => app.setNumbering(e.target.value)}>${NUMBERING_MODES.filter((m) => m.id !== 'led' || st.kilter).map((m) => html`<option value=${m.id}>${m.label}</option>`)}</select></label>
+      <div class="row2"><span class="hint" style="align-self:center">Start counting at</span><${Seg} value=${String(st.numberStart)} onChange=${(v) => app.setNumberStart(+v)} options=${[{ id: '0', label: '0' }, { id: '1', label: '1' }]} /></div>
+      <p class="hint">Numbers always run without gaps up to ${st.holds.filter((h) => !h.ghost).length ? st.holds.filter((h) => !h.ghost).length - 1 + st.numberStart : '–'}.</p>
       <label class="check"><input type="checkbox" checked=${st.ui.labels} onChange=${(e) => app.setUi({ labels: e.target.checked })} /><span>Show numbers</span></label>
     <//>
     <${NextBtn} to=${st.kilter ? 'board' : 'ready'} disabled=${!n} />
@@ -187,7 +197,7 @@ function RoutePanel() {
     <p class="hint">Pick a role, then click holds in the wall view. Click again to remove. The board shows the route live, like the Kilter app.</p>
     <div class="roles">${Object.entries(ROLES).map(([k, v]) => html`<button class=${r.brush === k ? 'on' : ''} style=${{ '--c': v.css }} onClick=${() => app.setBrush(k)}><i></i>${v.label}${counts[k] ? html`<b>${counts[k]}</b>` : ''}</button>`)}</div>
     <div class="row"><select value=${r.active || ''} onChange=${(e) => app.selectRoute(e.target.value)} style="flex:1">${r.items.length ? r.items.map((i) => html`<option value=${i.id}>${i.name}</option>`) : html`<option value="">No route yet</option>`}</select><${Btn} onClick=${() => app.newRoute()}>New<//></div>
-    ${active && html`<label class="field"><span>Name</span><input value=${active.name} onChange=${(e) => app.renameRoute(e.target.value)} /></label>`}
+    ${active && html`<label class="field"><span>Name</span><${EditField} value=${active.name} onCommit=${(v) => app.renameRoute(v)} /></label>`}
     <label class="check"><input type="checkbox" checked=${r.sync} onChange=${(e) => app.setRouteSync(e.target.checked)} /><span>Light the route on the board while editing</span></label>
     <div class="row"><${Btn} disabled=${!count} onClick=${() => app.clearRoute()}>Clear<//><${Btn} disabled=${!active} kind="danger" onClick=${() => confirm('Delete this route?') && app.deleteRoute(active.id)}>Delete<//><${Btn} disabled=${!r.items.length} onClick=${() => app.exportRoutes()}>Export<//></div>
   </div>`;
@@ -216,12 +226,13 @@ function BoardStep() {
       ${connected ? html`<${Btn} onClick=${() => app.disconnectBoard()}>Disconnect<//>` : html`<${Btn} kind="primary" onClick=${() => app.connectBoard()}>Connect board<//>`}</div>
     <//>
     <${Section} title="Find LED positions" hint="Every LED lights in a coded pattern while the camera watches. This assigns each hold its LED and takes about a minute. Keep the wall free of people.">
-      <label class="field"><span>Highest LED position + 1</span><input type="number" min="8" max="1500" step="1" value=${b.ledCount} onChange=${(e) => app.setLedCount(+e.target.value)} /></label>
-      <div class="row"><${Btn} onClick=${() => app.setLedCount(200)}>200<//><${Btn} onClick=${() => app.setLedCount(300)}>300<//><${Btn} onClick=${() => app.setLedCount(500)}>500<//><${Btn} onClick=${() => app.setLedCount(600)}>600<//></div>
+      <label class="field"><span>LED positions to test: 0 to ${b.ledCount - 1}</span><${EditField} type="number" min="16" max="4096" value=${b.ledCount} onCommit=${(v) => app.setLedCount(v)} /></label>
+      <p class="hint">The default covers every Kilter board. Only raise it if the scan reports LEDs near the end of the range. About ${Math.round(2 * Math.ceil(Math.sqrt(b.ledCount)) * 0.9)} seconds.</p>
       ${sc.running ? html`<div class="progress"><div style=${{ width: `${Math.round(sc.progress * 100)}%` }}></div></div><p class="hint center">${sc.message}</p><${Btn} kind="wide" onClick=${() => app.cancelScan()}>Cancel<//>` : html`<${Btn} kind="primary wide" disabled=${!connected || b.align.running} onClick=${() => app.scanLeds()}>${b.leds.length ? 'Scan again' : 'Scan LEDs'}<//>`}
       ${!sc.running && sc.message && !res && html`<p class="hint center">${sc.message}</p>`}
-      ${res && html`<div class="card"><b>${res.found} LEDs located</b> · ${st.holds.filter((h) => h.led != null && !h.ghost).length} matched to holds
+      ${res && html`<div class="card"><b>${res.found} LEDs located</b> (highest position ${res.maxPos}) · ${st.holds.filter((h) => h.led != null && !h.ghost).length} matched to holds
         ${verifyPct != null && html`<div class=${verifyPct >= 97 ? 'ok-t' : 'warn-t'}>Verification: ${verifyPct}% of LEDs behaved as predicted</div>`}
+        ${res.maxPos > res.range - Math.ceil(Math.sqrt(res.range)) && html`<div class="warn-t">LEDs found at the very end of the range: raise the range above and scan again.</div>`}
         ${(res.rejected > Math.max(3, res.found * 0.1) || res.uncertain > 0) && html`<div class="warn-t">${res.rejected > Math.max(3, res.found * 0.1) ? `${res.rejected} unreadable spots ignored` : ''}${res.rejected > Math.max(3, res.found * 0.1) && res.uncertain ? ', ' : ''}${res.uncertain ? `${res.uncertain} low confidence (amber dots)` : ''}</div>`}
         ${st.holds.some((h) => h.ghost) && html`<div class="hint">${st.holds.filter((h) => h.ghost).length} LEDs have no detected hold. They show as dashed circles; use "Add" in Holds if one is real.</div>`}</div>`}
     <//>

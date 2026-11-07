@@ -3,12 +3,12 @@ import { createStore } from '../store/store.js';
 import { FrameSource } from '../core/camera.js';
 import { Warper, warpCPU } from '../core/warp.js';
 import { wallSize } from '../core/wall.js';
-import { wallHomography, invert3, applyH, solveHomography, isValidQuad, pointInPolygon, polygonDistance, ellipsePolygon, polygonCentroid, polygonArea, orderCorners } from '../core/geometry.js';
+import { resolveOverlaps, wallHomography, invert3, applyH, solveHomography, isValidQuad, pointInPolygon, polygonDistance, ellipsePolygon, polygonCentroid, polygonArea, orderCorners } from '../core/geometry.js';
 import { OneEuro2D } from '../core/filters.js';
 import { ContactTracker, LIMBS } from '../core/contact.js';
 import { numberHolds } from '../core/numbering.js';
 import { analyzeWall, detectHolds, fitHoldAt } from '../cv/holds.js';
-import { bitCount, positionsForBit, findSpots, decodeSpots, verifyMapping, brightestSpot } from '../cv/calibrate.js';
+import { scanLayout, spotImage, findSpots, decodeSpots, pickVerifySet, verifyMapping, brightestSpot } from '../cv/calibrate.js';
 import { AuroraBoard, BleTransport } from '../board/aurora.js';
 import { PoseEngine, SKELETON, pickClimber, limbPoints, limbQuality, SideGuard, VARIANTS } from '../pose/pose.js';
 import { Bus, WebSocketSink, SerialSink, KilterSink, SessionRecorder, download, downloadBlob } from '../outputs/sinks.js';
@@ -27,9 +27,9 @@ export const store = createStore({
   kilter: false, mode: 'setup', step: 'camera', demo: false,
   wall: { wm: 3.6, hm: 3.6 }, corners: null,
   cam: { status: 'off', kind: 'none', label: '', width: 0, height: 0, fps: 0, devices: [], deviceId: '', res: 1080, rotation: 0, mirror: false, locked: false, lockMsg: '', error: '' },
-  holds: [], tool: 'select', selected: null, numbering: 'rows', canUndo: false, canRedo: false,
+  holds: [], tool: 'select', selected: null, numbering: 'rows', numberStart: 1, canUndo: false, canRedo: false,
   detect: { sensitivity: 0.5, minDia: 0, maxDia: 30, effMin: 0, busy: false, hasAnalysis: false, message: '' },
-  board: { state: 'idle', name: '', ledCount: 500, leds: [], rejected: 0, testing: null, scan: { running: false, progress: 0, message: '', result: null, verify: null }, align: { running: false, message: '' } },
+  board: { state: 'idle', name: '', ledCount: 1024, leds: [], rejected: 0, testing: null, scan: { running: false, progress: 0, message: '', result: null, verify: null }, align: { running: false, message: '' } },
   live: { running: false, loading: false, variant: 'auto', activeVariant: '', delegate: '', fps: 0, latency: 0, person: false, contacts: { LH: null, RH: null, LF: null, RF: null }, tolCm: 2.5, facing: 'wall', swapLR: false, lightBoard: false, error: '' },
   outputs: { ws: { url: 'ws://localhost:8765', state: 'off', detail: '' }, serial: { state: 'off', detail: '' } },
   session: { recording: false, events: 0, duration: 0, replayT: null, playing: false, summary: null },
@@ -263,6 +263,7 @@ class App {
       if (this._inPeople(f.cx, f.cy, px)) continue; // a person was standing there while the wall was captured
       out.push({ id: this.nextId++, ...f, source: 'auto' });
     }
+    resolveOverlaps(out.filter((h) => h.source === 'auto')); // touching holds: separate overlapping outlines
     this.holds = out;
     this._rebind(); this._renumber();
     if (!first) this.saveSoon();
@@ -311,11 +312,12 @@ class App {
 
   // ---------- holds: editing ----------
   _renumber() {
-    const mode = this.s.kilter && this.s.board.leds.length ? this.s.numbering : (this.s.numbering === 'led' && !this.s.board.leds.length ? 'rows' : this.s.numbering);
-    this.holds = numberHolds(this.holds, mode);
+    const mode = this.s.numbering === 'led' && !this.s.board.leds.length ? 'rows' : this.s.numbering;
+    this.holds = numberHolds(this.holds, mode, this.s.numberStart);
     this.set({ holds: this.holds });
   }
   setUi(p) { this.set({ ui: { ...this.s.ui, ...p } }); }
+  setNumberStart(n) { this.set({ numberStart: n ? 1 : 0 }); this._renumber(); this.saveSoon(); }
   setNumbering(mode) { this.set({ numbering: mode }); this._renumber(); this.saveSoon(); }
   _snap() { return { holds: clone(this.holds), suppress: clone(this.suppress), ignoredLeds: [...this.ignoredLeds], nextId: this.nextId, leds: clone(this.s.board.leds) }; }
   _restore(s) {
@@ -413,7 +415,7 @@ class App {
     for (let i = 0; i < 6 && this.s.live.running; i++) { await sleep(1500 * (i + 1)); try { await this.board.reconnect(); this._reconnecting = false; this.toast('Board reconnected.', 'ok'); return; } catch { /* retry */ } }
     this._reconnecting = false; this.toast('Board connection lost. Reconnect it in the Board step.', 'error');
   }
-  setLedCount(n) { this.set({ board: { ...this.s.board, ledCount: Math.max(8, Math.min(1500, n | 0)) } }); this.saveSoon(); }
+  setLedCount(n) { this.set({ board: { ...this.s.board, ledCount: Math.max(16, Math.min(4096, n | 0)) } }); this.saveSoon(); }
 
   async _captureSignal(dark, n = 3) {
     const f = await this.captureWall(n), N = f.width * f.height, sig = new Uint8Array(N), hist = new Uint32Array(256), d = new Int16Array(N);
@@ -438,8 +440,7 @@ class App {
     if (!this.board?.connected) { this.toast('Connect the board first.', 'error'); return; }
     if (!this.Himg2wall) { this.toast('Mark the wall corners first.', 'error'); return; }
     this._abortScan = false;
-    const N = this.s.board.ledCount, B = bitCount(N), total = B + 4, GREEN = { r: 0, g: 255, b: 0 };
-    const all = Array.from({ length: N }, (_, p) => ({ pos: p, ...GREEN }));
+    const N = this.s.board.ledCount, layout = scanLayout(N), F = layout.frames.length, total = F + 3, GREEN = { r: 0, g: 255, b: 0 };
     const step = async (i, msg) => { if (this._abortScan) throw new Error('Scan cancelled'); sc({ running: true, progress: i / total, message: msg }); };
     sc({ running: true, progress: 0, message: 'Preparing…', result: null, verify: null });
     try {
@@ -447,33 +448,32 @@ class App {
       await step(0, 'Lights off, taking reference…');
       await this.board.allOff(); await sleep(500);
       const dark = await this.captureWall(4);
-      await step(1, 'All LEDs on…');
-      await this.board.setLeds(all); await sleep(450);
-      const sigAll = await this._captureSignal(dark);
-      const bits = [];
-      for (let k = 0; k < B; k++) {
-        await step(2 + k, `Pattern ${k + 1} of ${B}…`);
-        await this.board.setLeds(positionsForBit(N, k).map((pos) => ({ pos, ...GREEN }))); await sleep(450);
-        bits.push(await this._captureSignal(dark));
+      // Sparse patterns: never more than ~sqrt(N) LEDs on at once, so a weak board power supply does not sag.
+      const signals = [];
+      for (let k = 0; k < F; k++) {
+        const f = layout.frames[k];
+        await step(1 + k, `Pattern ${k + 1} of ${F} (${f.positions.length} LEDs on)…`);
+        await this.board.setLeds(f.positions.map((pos) => ({ pos, ...GREEN }))); await sleep(380);
+        signals.push(await this._captureSignal(dark, 2));
       }
       await this.board.allOff();
-      await step(2 + B, 'Decoding…');
+      await step(1 + F, 'Decoding…');
       const { RW, RH, pxPerCm } = this.wallDims;
-      const spots = findSpots(sigAll, RW, RH, pxPerCm);
-      const { leds, rejected } = decodeSpots(spots, sigAll, bits, N);
-      if (leds.length < 4) throw new Error(`Only ${leds.length} LEDs found. Check the camera view, the LED count and that the board is lit.`);
-      // verification pass: a different on/off pattern must be predicted by the mapping
-      await step(3 + B, 'Verifying…');
-      const pattern = leds.filter((l) => l.pos % 3 === 0).map((l) => l.pos);
-      await this.board.setLeds(pattern.map((pos) => ({ pos, ...GREEN }))); await sleep(450);
-      const sigV = await this._captureSignal(dark);
+      const spots = findSpots(spotImage(layout, signals), RW, RH, pxPerCm);
+      const { leds, rejected } = decodeSpots(spots, signals, layout);
+      if (leds.length < 4) throw new Error(`Only ${leds.length} LEDs found. Check that the whole board is in view, that nothing covers it, and that the LEDs light up when you click a hold in the light test.`);
+      // verification: a different sparse pattern must light exactly the LEDs the mapping predicts
+      await step(2 + F, 'Verifying…');
+      const lit = pickVerifySet(leds, 36, 7);
+      await this.board.setLeds([...lit].map((pos) => ({ pos, ...GREEN }))); await sleep(380);
+      const sigV = await this._captureSignal(dark, 2);
       await this.board.allOff();
-      const ver = verifyMapping(leds, sigAll, pattern, sigV);
-      const uncertain = leds.filter((l) => l.conf < 0.35).length;
-      const result = { found: leds.length, rejected: rejected.length, uncertain, verifyOk: ver.ok, verifyBad: ver.bad };
+      const ver = verifyMapping(leds, lit, sigV);
+      const uncertain = leds.filter((l) => l.conf < 0.35).length, maxPos = leds.reduce((m, l) => Math.max(m, l.pos), 0);
+      const result = { found: leds.length, rejected: rejected.length, uncertain, verifyOk: ver.ok, verifyBad: ver.bad, maxPos, range: N };
       this.set({ board: { ...this.s.board, leds: leds.map(({ pos, x, y, conf }) => ({ pos, x, y, conf })), rejected: rejected.length } });
       this.board.setKnownPositions(leds.map((l) => l.pos));
-      this._rebind(); this.set({ numbering: this.s.numbering === 'rows' ? 'led' : this.s.numbering }); this._renumber(); this.commit();
+      this._rebind(); this._renumber(); this.commit();
       sc({ running: false, progress: 1, message: 'Done', result, verify: ver });
       this.saveSoon();
     } catch (e) {
@@ -673,7 +673,9 @@ class App {
     // stateless search over the three rotations; keeps the reading with the best visible hands/feet
     const searchRot = (r) => {
       let best = null;
-      for (const rot of [0, 90, -90]) {
+      // every rotation costs one inference: on a slow machine only try the current one most of the time
+      const rots = this._lat > 45 && (this._searchN = (this._searchN || 0) + 1) % 6 ? [this._rot || 0] : [0, 90, -90];
+      for (const rot of rots) {
         const pk = pickClimber(this.engine.detect(this.source.canvas, now, r, rot, true), quad, this.prevPerson);
         if (pk) { const sc = limbQuality(pk.pose.lm) + pk.pose.lm.filter((q) => q.v > 0.3).length * 0.01 + (rot === (this._rot || 0) ? 0.1 : 0); // bias: do not flip rotation for small gains
           if (!best || sc > best.sc) best = { pose: pk.pose, sc }; }
@@ -778,7 +780,7 @@ class App {
   // ---------- profiles ----------
   _profileData() {
     const s = this.s;
-    return { id: s.profileId, name: s.profileName, kilter: s.kilter, wall: s.wall, corners: s.corners, camRotation: s.cam.rotation, camMirror: s.cam.mirror, holds: this.holds, suppress: this.suppress, ignoredLeds: this.ignoredLeds, nextId: this.nextId, numbering: s.numbering, detect: { sensitivity: s.detect.sensitivity, minDia: s.detect.minDia, maxDia: s.detect.maxDia }, ledCount: s.board.ledCount, leds: s.board.leds, routes: s.routes.items, snapshot: this.snapshotBlob, holdCount: this.holds.filter((h) => !h.ghost).length };
+    return { id: s.profileId, name: s.profileName, kilter: s.kilter, wall: s.wall, corners: s.corners, camRotation: s.cam.rotation, camMirror: s.cam.mirror, holds: this.holds, suppress: this.suppress, ignoredLeds: this.ignoredLeds, nextId: this.nextId, numbering: s.numbering, numberStart: s.numberStart, detect: { sensitivity: s.detect.sensitivity, minDia: s.detect.minDia, maxDia: s.detect.maxDia }, ledCount: s.board.ledCount, leds: s.board.leds, routes: s.routes.items, snapshot: this.snapshotBlob, holdCount: this.holds.filter((h) => !h.ghost).length };
   }
   saveSoon() { this.set({ saved: false }); clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
   async saveNow() {
@@ -791,11 +793,11 @@ class App {
     this.history = []; this.future = []; this.analysis = null; this.snapshot = null; this.snapshotBitmap = null; this.snapshotBlob = p.snapshot || null;
     if (p.snapshot instanceof Blob) { const bmp = await createImageBitmap(p.snapshot); const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height; c.getContext('2d').drawImage(bmp, 0, 0); this.snapshotBitmap = c; }
     this.set({
-      profileId: p.id, profileName: p.name, kilter: !!p.kilter, wall: p.wall || { wm: 3.6, hm: 3.6 }, corners: p.corners || this.s.corners, holds: this.holds, numbering: p.numbering || 'rows', selected: null,
+      profileId: p.id, profileName: p.name, kilter: !!p.kilter, wall: p.wall || { wm: 3.6, hm: 3.6 }, corners: p.corners || this.s.corners, holds: this.holds, numbering: p.numbering || 'rows', numberStart: p.numberStart ?? 1, selected: null,
       cam: { ...this.s.cam, rotation: p.camRotation || 0, mirror: !!p.camMirror },
       detect: { ...this.s.detect, ...(p.detect || {}), hasAnalysis: false, busy: false, message: '' },
       routes: { items: p.routes || [], active: p.routes?.[0]?.id ?? null, brush: 'hand', sync: true }, show: { ...this.s.show, running: false }, kilterTab: 'test',
-      board: { ...this.s.board, ledCount: p.ledCount || 500, leds: p.leds || [], scan: { ...this.s.board.scan, result: null, verify: null } },
+      board: { ...this.s.board, ledCount: Math.max(1024, p.ledCount || 0), leds: p.leds || [], scan: { ...this.s.board.scan, result: null, verify: null } },
       step: this.source.active ? (p.corners ? 'align' : 'align') : 'camera', mode: 'setup', saved: true, demo: false,
     });
     this.source.setOrientation({ rotation: this.s.cam.rotation, mirror: this.s.cam.mirror });
@@ -815,7 +817,7 @@ class App {
     if (id === this.s.profileId) { if (list.length) await this.loadProfile(list[0].id); else await this.newProfile('My wall'); }
   }
   renameProfile(name) { this.set({ profileName: name || 'Wall' }); this.saveSoon(); }
-  setKilter(on) { this.set({ kilter: on, numbering: on && this.s.board.leds.length ? 'led' : this.s.numbering }); if (this.s.step === 'board' && !on) this.set({ step: 'ready' }); this.saveSoon(); }
+  setKilter(on) { this.set({ kilter: on }); if (this.s.step === 'board' && !on) this.set({ step: 'ready' }); this.saveSoon(); }
   async exportProfileFile() { await this.saveNow(); download(`${this.s.profileName.replace(/\W+/g, '_')}.bvprofile.json`, await profiles.exportProfile(this._profileData())); }
   async importProfileFile(file) {
     try { const p = await profiles.importProfile(await file.text()); await profiles.saveProfile(p); this.set({ profiles: await profiles.listProfiles() }); await this.loadProfile(p.id); this.toast('Profile imported.', 'ok'); }

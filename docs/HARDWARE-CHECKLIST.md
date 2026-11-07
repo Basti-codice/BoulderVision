@@ -18,6 +18,10 @@ real climber while this was written. Go through this list once and note anything
 
 ## LED scan
 
+* The scan lights at most about 30 LEDs at a time (row/column patterns), so a weak power supply should not sag. If the
+  LEDs still look dim during the scan, tell me the LED count and what the board does.
+* Hold numbers are always consecutive (start at 0 or 1, your choice). The LED position is shown separately.
+
 * Keep people out of the camera view and lock the phone's exposure (the *Lock* option, or disable auto-exposure in
   the camera app). Room lights should not flicker or change.
 * After the scan the Board step reports how many LEDs were found and a verification score (aim for above 97 %).

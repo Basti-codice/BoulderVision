@@ -27,7 +27,7 @@ simulated wall, a virtual LED board and a virtual climber.
 | **Camera** | Webcam, USB/phone webcam, phone via QR code (WebRTC), or a video/photo file. Rotate/mirror, lock exposure. |
 | **Align** | Drag four handles onto the wall corners; a live straightened preview and grid show the result. Enter the real wall size. |
 | **Holds** | One click detects all holds. Three filters (sensitivity, min size, max size). Select / Add / Remove tools, undo/redo, numbering. |
-| **Board** (Kilter mode) | Connect over Bluetooth, scan LEDs (Gray-code patterns, ~1 min), light test by clicking a hold. |
+| **Board** (Kilter mode) | Connect over Bluetooth, scan LEDs (sparse row/column patterns, ~1 min, at most ~30 LEDs on at once), light test by clicking a hold. |
 | **Go live** | Pose tracking, contact detection, optional LED output, session recording and export. |
 
 Profiles (one per board) store corners, holds and the LED map in IndexedDB. For a new session with the same board

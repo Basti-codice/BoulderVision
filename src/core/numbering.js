@@ -5,7 +5,7 @@ export const NUMBERING_MODES = [
   { id: 'columns', label: 'Columns, left to right' },
   { id: 'snake', label: 'Rows, snake pattern' },
   { id: 'size', label: 'Size, largest first' },
-  { id: 'led', label: 'LED position (Kilter)' },
+  { id: 'led', label: 'Order of the LED strip (Kilter)' },
 ];
 
 function medianDia(holds) {
@@ -27,8 +27,11 @@ function bands(holds, key, tol) {
   return out;
 }
 
-/** Returns holds (new array) with .label = 1..n. */
-export function numberHolds(holds, mode = 'rows') {
+/**
+ * Returns holds (new array) with .label. Numbers are always consecutive: start, start+1, ... (start = 0 or 1).
+ * The LED position is a separate property (shown in the inspector), never used as the number.
+ */
+export function numberHolds(holds, mode = 'rows', start = 1) {
   const active = holds.filter((h) => !h.ghost);
   const tol = medianDia(active) * 1.1;
   let order;
@@ -44,11 +47,6 @@ export function numberHolds(holds, mode = 'rows') {
     const rest = bands(active.filter((h) => h.led == null), (h) => -h.cy, tol).flatMap((r) => r.sort((a, b) => a.cx - b.cx));
     order = withLed.concat(rest);
   } else order = active;
-  let labels;
-  if (mode === 'led') {
-    const maxLed = Math.max(-1, ...active.filter((h) => h.led != null).map((h) => h.led));
-    let next = maxLed + 1;
-    labels = new Map(order.map((h) => [h.id, h.led != null ? h.led : next++]));
-  } else labels = new Map(order.map((h, i) => [h.id, i + 1]));
+  const labels = new Map(order.map((h, i) => [h.id, start + i]));
   return holds.map((h) => ({ ...h, label: labels.get(h.id) ?? null }));
 }

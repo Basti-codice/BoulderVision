@@ -43,3 +43,25 @@ test('polygon helpers', () => {
   assert.equal(hull.length, 4);
   assert.equal(simplifyPolygon(hull, 3).length, 3);
 });
+
+import { resolveOverlaps, ellipsePolygon, pointInPolygon } from '../../src/core/geometry.js';
+import { numberHolds } from '../../src/core/numbering.js';
+
+test('overlapping hold outlines are separated', () => {
+  const mk = (id, x) => ({ id, cx: x, cy: 100, poly: ellipsePolygon(x, 100, 30, 20, 10), area: 1800, source: 'auto' });
+  const a = mk(1, 100), b = mk(2, 140);
+  assert.ok(a.poly.some(([x, y]) => pointInPolygon(b.poly, x, y)), 'test setup overlaps');
+  resolveOverlaps([a, b]);
+  assert.ok(!a.poly.some(([x, y]) => pointInPolygon(b.poly, x, y)));
+  assert.ok(!b.poly.some(([x, y]) => pointInPolygon(a.poly, x, y)));
+});
+
+test('numbering is always consecutive and starts at 0 or 1, LED order only changes the order', () => {
+  const holds = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, cx: (i % 6) * 100, cy: Math.floor(i / 6) * 100, area: 900, led: i % 3 === 0 ? 700 - i * 20 : undefined }));
+  for (const mode of ['rows', 'columns', 'snake', 'size', 'led']) for (const start of [0, 1]) {
+    const labels = numberHolds(holds, mode, start).map((h) => h.label).sort((a, b) => a - b);
+    assert.deepEqual(labels, Array.from({ length: 30 }, (_, i) => i + start), `${mode} start ${start}`);
+  }
+  const byLed = numberHolds(holds, 'led', 1).filter((h) => h.led != null).sort((a, b) => a.label - b.label).map((h) => h.led);
+  assert.deepEqual(byLed, byLed.slice().sort((a, b) => a - b));
+});

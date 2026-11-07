@@ -65,6 +65,14 @@ check('remove/undo/add', edit.n1 === edit.n0 - 1 && edit.n2 === edit.n0 && edit.
 
 // --- LED scan through the UI
 await page.click('.step:has-text("Board")');
+// typing into the LED range field must not be reset by re-renders (camera fps updates every second)
+const rangeInput = page.locator('input[type=number][min="16"]');
+await rangeInput.click(); await rangeInput.fill(''); await rangeInput.pressSequentially('1100', { delay: 400 });
+check('range field keeps typed text while the UI re-renders', (await rangeInput.inputValue()) === '1100');
+await page.keyboard.press('Enter');
+check('range value applied on Enter', (await page.evaluate(() => window.__bv.s.board.ledCount)) === 1100);
+await page.evaluate(() => window.__bv.setLedCount(1024));
+await page.evaluate(() => { window.__maxLit = 0; window.__litTimer = setInterval(() => { window.__maxLit = Math.max(window.__maxLit, window.__bv.world.lit.size); }, 20); });
 await page.click('button.btn:has-text("Scan LEDs")');
 await page.waitForFunction(() => !window.__bv.s.board.scan.running && window.__bv.s.board.leds.length > 0, null, { timeout: 120000 });
 const scan = await page.evaluate(() => {
@@ -74,7 +82,11 @@ const scan = await page.evaluate(() => {
   const r = a.s.board.scan.result;
   return { truth: w.leds.length, found: a.s.board.leds.length, ok, bad, verify: [r.verifyOk, r.verifyBad], matchedHolds: a.holds.filter((h) => h.led != null && !h.ghost).length, ghosts: a.holds.filter((h) => h.ghost).length, empty: w.empty.length };
 });
+scan.maxLit = await page.evaluate(() => { clearInterval(window.__litTimer); return window.__maxLit; });
+scan.labels = await page.evaluate(() => { const l = window.__bv.holds.filter((h) => !h.ghost).map((h) => h.label).sort((a, b) => a - b); return { n: l.length, first: l[0], last: l.at(-1), gaps: l.some((v, i) => v !== l[0] + i) }; });
 console.log('   scan', JSON.stringify(scan));
+check('scan never lights more than 40 LEDs at once', scan.maxLit <= 40, `max ${scan.maxLit}`);
+check('hold numbers are consecutive from 1', scan.labels.first === 1 && scan.labels.last === scan.labels.n && !scan.labels.gaps, JSON.stringify(scan.labels));
 check('LED scan: >= 97% located within 12 px', scan.ok / scan.truth >= 0.97 && scan.bad <= 6);
 check('LED scan: verification clean', scan.verify[1] <= 1);
 check('LEDs bound to holds', scan.matchedHolds >= scan.truth - scan.empty - 6);
