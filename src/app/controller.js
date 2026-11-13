@@ -5,6 +5,7 @@ import { Warper, warpCPU } from '../core/warp.js';
 import { wallSize } from '../core/wall.js';
 import { resolveOverlaps, wallHomography, invert3, applyH, solveHomography, isValidQuad, pointInPolygon, polygonDistance, ellipsePolygon, polygonCentroid, polygonArea, orderCorners } from '../core/geometry.js';
 import { OneEuro2D } from '../core/filters.js';
+import { bindLeds } from '../core/binding.js';
 import { ContactTracker, LIMBS } from '../core/contact.js';
 import { numberHolds } from '../core/numbering.js';
 import { analyzeWall, detectHolds, fitHoldAt } from '../cv/holds.js';
@@ -30,7 +31,7 @@ export const store = createStore({
   holds: [], tool: 'select', selected: null, numbering: 'rows', numberStart: 1, canUndo: false, canRedo: false,
   detect: { sensitivity: 0.5, minDia: 0, maxDia: 30, effMin: 0, busy: false, hasAnalysis: false, message: '' },
   board: { state: 'idle', name: '', ledCount: 1024, leds: [], rejected: 0, testing: null, scan: { running: false, progress: 0, message: '', result: null, verify: null }, align: { running: false, message: '' } },
-  live: { running: false, loading: false, variant: 'auto', activeVariant: '', delegate: '', fps: 0, latency: 0, person: false, contacts: { LH: null, RH: null, LF: null, RF: null }, tolCm: 2.5, facing: 'wall', swapLR: false, lightBoard: false, error: '' },
+  live: { footUp: 0, handUp: 0, parallax: 0, running: false, loading: false, variant: 'auto', activeVariant: '', delegate: '', fps: 0, latency: 0, person: false, contacts: { LH: null, RH: null, LF: null, RF: null }, tolCm: 2.5, facing: 'wall', swapLR: false, lightBoard: false, error: '' },
   outputs: { ws: { url: 'ws://localhost:8765', state: 'off', detail: '' }, serial: { state: 'off', detail: '' } },
   session: { recording: false, events: 0, duration: 0, replayT: null, playing: false, summary: null },
   phone: { state: 'off', url: '', baseUrl: '', detail: '', lan: null },
@@ -67,7 +68,7 @@ class App {
     const st = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     this.set({
       cam: { ...this.s.cam, res: st.res || 1080, deviceId: st.deviceId || '' },
-      live: { ...this.s.live, tolCm: st.tolCm ?? 2.5, facing: st.facing || 'wall', variant: st.variant || 'auto' },
+      live: { ...this.s.live, tolCm: st.tolCm ?? 2.5, facing: st.facing || 'wall', variant: st.variant || 'auto', footUp: st.footUp ?? 0, handUp: st.handUp ?? 0, parallax: st.parallax ?? 0 },
       outputs: { ...this.s.outputs, ws: { ...this.s.outputs.ws, url: st.wsUrl || this.s.outputs.ws.url } },
       phone: { ...this.s.phone, baseUrl: st.phoneBase || location.href.replace(/#.*$/, '') },
     });
@@ -92,7 +93,7 @@ class App {
   }
   saveSettings() {
     const { cam, live, outputs, phone } = this.s;
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ res: cam.res, deviceId: cam.deviceId, tolCm: live.tolCm, facing: live.facing, variant: live.variant, wsUrl: outputs.ws.url, phoneBase: phone.baseUrl }));
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ res: cam.res, deviceId: cam.deviceId, tolCm: live.tolCm, facing: live.facing, variant: live.variant, footUp: live.footUp, handUp: live.handUp, parallax: live.parallax, wsUrl: outputs.ws.url, phoneBase: phone.baseUrl }));
   }
 
   // ---------- main loop ----------
@@ -490,16 +491,11 @@ class App {
     this.holds = this.holds.filter((h) => !(h.ghost && h.source === 'led'));
     for (const h of this.holds) delete h.led;
     if (!leds.length) return;
-    const px = this.pxPerCm, used = new Set();
-    for (const l of leds) {
-      let best = null, bd = Infinity;
-      for (const h of this.holds) { const d = polygonDistance(h.poly, l.x, l.y); if (d < bd) { bd = d; best = h; } }
-      if (best && bd <= 2.5 * px) { if (best.led == null || bd < best._ld) { if (best.led != null) used.delete(best.led); best.led = l.pos; best._ld = bd; used.add(l.pos); } }
-    }
-    for (const h of this.holds) delete h._ld;
-    for (const l of leds) {
-      if (used.has(l.pos) || this.ignoredLeds.includes(l.pos)) continue;
-      const r = 2 * px;
+    const { byHold, unmatched } = bindLeds(this.holds, leds, this.pxPerCm);
+    for (const h of this.holds) { const l = byHold.get(h.id); if (l) h.led = l.pos; }
+    const r = 2 * this.pxPerCm;
+    for (const l of unmatched) {
+      if (this.ignoredLeds.includes(l.pos)) continue;
       this.holds.push({ id: 1e6 + l.pos, cx: l.x, cy: l.y, poly: ellipsePolygon(l.x, l.y, r, r, 8), area: Math.PI * r * r, solidity: 1, diaCm: 4, source: 'led', ghost: true, led: l.pos }); // stable id: selection survives re-binding
     }
   }
@@ -662,8 +658,19 @@ class App {
     if (best.rot !== (this._rot || 0)) { this._rot = best.rot; this.track = null; this._lost = 99; this._tile = -1; }
   }
 
+  /**
+   * Correct a limb point in wall coordinates. Parallax: the climber stands in front of the wall, so a close camera sees
+   * the body pushed away from the point it looks at; pull points back towards that centre. Plus manual up-shifts.
+   */
+  _adjust(limb, x, y) {
+    const { parallax, footUp, handUp } = this.s.live, px = this.pxPerCm;
+    if (parallax > 0) { const c = this._viewCentre ??= this.imgToWall(this.source.width / 2, this.source.height / 2); x = c[0] + (x - c[0]) * (1 - parallax); y = c[1] + (y - c[1]) * (1 - parallax); }
+    return [x, y - (limb.endsWith('F') ? footUp : handUp) * px];
+  }
+
   _liveStep(now) {
     const { width: W, height: H } = this.source, c = this.s.corners;
+    this._viewCentre = null;
     const searching = !(this.track && this._lost < 4);
     const roi = this._poseRoi();
     this.poseBusy = true;
@@ -707,8 +714,8 @@ class App {
       for (const limb of LIMBS) {
         if (!raw[limb]) { for (let i = 0; i < 2; i++) this.filters.delete(limb + i); continue; }
         wallLimbs[limb] = raw[limb].map((p, i) => {
-          const [wx, wy] = toWall(p);
-          let f = this.filters.get(limb + i); if (!f) { f = new OneEuro2D({ minCutoff: 1.5, beta: 0.02 }); this.filters.set(limb + i, f); }
+          const [wx, wy] = this._adjust(limb, ...toWall(p));
+          let f = this.filters.get(limb + i); if (!f) { f = new OneEuro2D({ minCutoff: 1.6, beta: 0.05 }); this.filters.set(limb + i, f); }
           const [fx, fy] = f.filter(wx, wy, now / 1000);
           return { x: fx, y: fy };
         });

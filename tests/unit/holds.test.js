@@ -74,3 +74,20 @@ test('wall-edge strips and long thin streaks are not holds', () => {
   assert.ok(res.holds.every((h) => !(h.cx < 20 && h.diaCm > 8)), 'edge strip rejected');
   assert.ok(s.precision > 0.97 && s.recall > 0.95, JSON.stringify(s));
 });
+
+import { resolveOverlaps, polygonsOverlap } from '../../src/core/geometry.js';
+
+for (const [name, o] of [['dense wall with strong vignette (crowded edge cells)', { cols: 22, rows: 22, minR: 12, maxR: 21, seed: 5, vig: 0.7 }], ['very dense wall, holds nearly touching', { cols: 26, rows: 26, minR: 11, maxR: 19, seed: 9, vig: 0.4 }]]) {
+  test(name, () => {
+    const holds = gridHolds({ cols: o.cols, rows: o.rows, minR: o.minR, maxR: o.maxR, seed: o.seed });
+    const img = renderWall({ holds, vignette: o.vig, noise: 5, bg: [70, 70, 74], holdCol: [205, 205, 200] });
+    const res = detectHolds(analyzeWall(img), { pxPerCm: PX });
+    resolveOverlaps(res.holds);
+    const s = score(holds, res.holds);
+    let overlaps = 0;
+    for (let i = 0; i < res.holds.length; i++) for (let j = i + 1; j < res.holds.length; j++) if (polygonsOverlap(res.holds[i].poly, res.holds[j].poly)) overlaps++;
+    assert.ok(s.recall > 0.97, `recall ${s.recall}`);
+    assert.ok(s.precision > 0.97, `precision ${s.precision}`);
+    assert.equal(overlaps, 0, 'outlines must not overlap');
+  });
+}

@@ -9,25 +9,74 @@ import { convexHull, simplifyPolygon, offsetPolygon, polygonArea, polygonCentroi
 
 // ---------- analysis (expensive, once per snapshot) ----------
 
-function channelModes(ch, w, h, gx, gy) {
-  const cw = w / gx, chh = h / gy, modes = new Float32Array(gx * gy);
-  const hist = new Uint32Array(256);
+/**
+ * Per grid cell: the two biggest colour clusters (by luma, +-8 bins) with their mean Y/Cb/Cr and share of the cell.
+ * Mean colours come from per-bin sums, so no second pass over the pixels is needed.
+ */
+function cellClusters(Y, Cb, Cr, w, h, gx, gy) {
+  const cw = w / gx, chh = h / gy, cells = [], cnt = new Uint32Array(256), sCb = new Float64Array(256), sCr = new Float64Array(256);
+  const R = 8;
   for (let cy = 0; cy < gy; cy++) for (let cx = 0; cx < gx; cx++) {
-    hist.fill(0);
+    cnt.fill(0); sCb.fill(0); sCr.fill(0);
     const x0 = Math.floor(cx * cw), x1 = Math.floor((cx + 1) * cw), y0 = Math.floor(cy * chh), y1 = Math.floor((cy + 1) * chh);
-    for (let y = y0; y < y1; y += 2) for (let x = x0; x < x1; x += 2) hist[ch[y * w + x]]++;
-    let best = 0, bestV = -1; // smoothed mode (window +-3 bins)
-    for (let b = 0; b < 256; b++) {
-      let s = 0;
-      for (let k = Math.max(0, b - 3); k <= Math.min(255, b + 3); k++) s += hist[k];
-      if (s > bestV) { bestV = s; best = b; }
-    }
-    // refine: weighted mean inside the winning window
-    let num = 0, den = 0;
-    for (let k = Math.max(0, best - 3); k <= Math.min(255, best + 3); k++) { num += k * hist[k]; den += hist[k]; }
-    modes[cy * gx + cx] = den ? num / den : best;
+    let n = 0;
+    for (let y = y0; y < y1; y += 2) for (let x = x0; x < x1; x += 2) { const i = y * w + x, b = Y[i]; cnt[b]++; sCb[b] += Cb[i]; sCr[b] += Cr[i]; n++; }
+    const mass = (c) => { let m = 0; for (let k = Math.max(0, c - R); k <= Math.min(255, c + R); k++) m += cnt[k]; return m; };
+    const pick = (excl) => {
+      let best = -1, bm = 0;
+      for (let c = 0; c < 256; c++) { if (excl >= 0 && Math.abs(c - excl) <= 2 * R) continue; const m = mass(c); if (m > bm) { bm = m; best = c; } }
+      if (best < 0 || bm < 0.08 * n) return null;
+      let m = 0, sy = 0, scb = 0, scr = 0;
+      for (let k = Math.max(0, best - R); k <= Math.min(255, best + R); k++) { m += cnt[k]; sy += k * cnt[k]; scb += sCb[k]; scr += sCr[k]; }
+      return { y: sy / m, cb: scb / m, cr: scr / m, share: m / n };
+    };
+    const c1 = pick(-1), c2 = c1 ? pick(Math.round(c1.y)) : null;
+    cells.push({ c1: c1 || { y: 0, cb: 128, cr: 128, share: 0 }, c2 });
   }
-  return modes;
+  return cells;
+}
+
+/**
+ * Wall colour changes smoothly (lighting, vignette). Fit a smooth surface (quadratic, Tukey-weighted) to the cells
+ * where one colour clearly dominates (those are wall), then in crowded cells pick the colour cluster that matches it.
+ * In a crowded cell the holds can be the biggest cluster; this keeps them from becoming "background".
+ */
+function robustSurface(values, gx, gy, w0) {
+  const P = 6, n = gx * gy, basis = (u, v) => [1, u, v, u * u, u * v, v * v];
+  const U = [], V = [];
+  for (let j = 0; j < gy; j++) for (let i = 0; i < gx; i++) { U.push((i + 0.5) / gx * 2 - 1); V.push((j + 0.5) / gy * 2 - 1); }
+  let wts = Float64Array.from(w0), coef = new Float64Array(P), scale = 5;
+  for (let it = 0; it < 8; it++) {
+    const A = Array.from({ length: P }, () => new Float64Array(P + 1));
+    for (let k = 0; k < n; k++) { if (!wts[k]) continue; const b = basis(U[k], V[k]); for (let r = 0; r < P; r++) { for (let c = 0; c < P; c++) A[r][c] += wts[k] * b[r] * b[c]; A[r][P] += wts[k] * b[r] * values[k]; } }
+    for (let c = 0; c < P; c++) A[c][c] += 1e-6;
+    for (let c = 0; c < P; c++) {
+      let piv = c; for (let r = c + 1; r < P; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+      [A[c], A[piv]] = [A[piv], A[c]];
+      for (let r = 0; r < P; r++) { if (r === c) continue; const f = A[r][c] / A[c][c]; for (let k = c; k <= P; k++) A[r][k] -= f * A[c][k]; }
+    }
+    for (let c = 0; c < P; c++) coef[c] = A[c][P] / A[c][c];
+    const res = Array.from({ length: n }, (_, k) => values[k] - basis(U[k], V[k]).reduce((s, v, c) => s + v * coef[c], 0));
+    const used = res.filter((_, k) => w0[k]).map(Math.abs).sort((a, b) => a - b);
+    scale = Math.max(2.5, 1.4826 * (used[used.length >> 1] || 0));
+    wts = Float64Array.from(res, (r, k) => { if (!w0[k]) return 0; const t = r / (4.685 * scale); return Math.abs(t) < 1 ? (1 - t * t) ** 2 : 0; });
+  }
+  return (k) => basis(U[k], V[k]).reduce((s, v, c) => s + v * coef[c], 0);
+}
+
+function backgroundGrid(Y, Cb, Cr, w, h, gx, gy) {
+  const cells = cellClusters(Y, Cb, Cr, w, h, gx, gy), n = cells.length;
+  let w0 = Float64Array.from(cells, (c) => (c.c1.share >= 0.6 ? 1 : 0));
+  if (w0.reduce((s, v) => s + v, 0) < 8) w0 = new Float64Array(n).fill(1); // everything is crowded: trust all cells
+  const sy = robustSurface(cells.map((c) => c.c1.y), gx, gy, w0), scb = robustSurface(cells.map((c) => c.c1.cb), gx, gy, w0), scr = robustSurface(cells.map((c) => c.c1.cr), gx, gy, w0);
+  const oy = new Float32Array(n), ocb = new Float32Array(n), ocr = new Float32Array(n);
+  for (let k = 0; k < n; k++) {
+    const py = sy(k), pcb = scb(k), pcr = scr(k);
+    const err = (c) => Math.abs(c.y - py) + 0.8 * (Math.abs(c.cb - pcb) + Math.abs(c.cr - pcr));
+    const cand = [cells[k].c1, cells[k].c2].filter(Boolean).sort((a, b) => err(a) - err(b))[0];
+    if (cand && err(cand) < 28) { oy[k] = cand.y; ocb[k] = cand.cb; ocr[k] = cand.cr; } else { oy[k] = py; ocb[k] = pcb; ocr[k] = pcr; }
+  }
+  return { oy, ocb, ocr };
 }
 
 function interpolate(modes, gx, gy, w, h) {
@@ -74,9 +123,8 @@ export function analyzeWall(img) {
     Cr[i] = ((128 * r - 107 * g - 21 * b) >> 8) + 128;
   }
   const gx = 10, gy = Math.max(3, Math.round(h / (w / 10)));
-  const bgY = interpolate(channelModes(Y, w, h, gx, gy), gx, gy, w, h);
-  const bgCb = interpolate(channelModes(Cb, w, h, gx, gy), gx, gy, w, h);
-  const bgCr = interpolate(channelModes(Cr, w, h, gx, gy), gx, gy, w, h);
+  const g = backgroundGrid(Y, Cb, Cr, w, h, gx, gy);
+  const bgY = interpolate(g.oy, gx, gy, w, h), bgCb = interpolate(g.ocb, gx, gy, w, h), bgCr = interpolate(g.ocr, gx, gy, w, h);
   const raw = new Float32Array(N);
   for (let i = 0; i < N; i++) {
     const dy = Y[i] - bgY[i], db = Cb[i] - bgCb[i], dr = Cr[i] - bgCr[i];
@@ -248,7 +296,7 @@ export function detectHolds(analysis, params) {
   let mask = hysteresis(dE, w, h, low, high);
   mask = dilate(erode(mask, w, h), w, h); // opening: kills specks / thin streaks
   const dt = distanceTransform(mask, w, h);
-  const label = watershed(dt, mask, w, h, Math.max(1.2, 0.5 * pxPerCm));
+  const label = watershed(dt, mask, w, h, Math.max(1.0, 0.28 * pxPerCm)); // small: touching holds must separate
   // candidates: plausible size and shape (wall frames, edges and streaks are long and thin)
   const cands = [];
   for (const r of regionsFromLabels(label, w, h).values()) {

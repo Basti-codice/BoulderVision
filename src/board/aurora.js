@@ -94,7 +94,13 @@ export class BleTransport {
     const service = await server.getPrimaryService(UART_SERVICE);
     this.rx = await service.getCharacteristic(UART_RX);
   }
-  async write(chunk) { await this.rx.writeValueWithResponse(chunk); }
+  async write(chunk) {
+    // Without response is much faster (no round trip per 20 bytes); fall back to the acknowledged write on any error.
+    if (this.fast !== false && this.rx.properties?.writeWithoutResponse && this.rx.writeValueWithoutResponse) {
+      try { await this.rx.writeValueWithoutResponse(chunk); return; } catch { this.fast = false; }
+    }
+    await this.rx.writeValueWithResponse(chunk);
+  }
   close() { if (this.device?.gatt.connected) this.device.gatt.disconnect(); }
 }
 
@@ -127,7 +133,7 @@ export class AuroraBoard extends EventTarget {
     this.lit = new Map();          // pos -> {r,g,b} we believe is shown
     this.known = new Set();        // all positions we know exist (from calibration)
     this.queue = Promise.resolve();
-    this.delay = 12;               // ms between chunks; adapts
+    this.delay = 8;                // ms between chunks; adapts
     this.state = 'disconnected';
   }
   _status(s, detail) { this.state = s; this.dispatchEvent(new CustomEvent('status', { detail: { state: s, name: this.t.name, detail } })); }
@@ -136,7 +142,7 @@ export class AuroraBoard extends EventTarget {
 
   async connect() {
     this._status('connecting');
-    try { await this.t.request(); await this.t.open(); this.lit = new Map(); this.delay = this.t instanceof MockTransport ? 0 : 12; this._status('connected'); }
+    try { await this.t.request(); await this.t.open(); this.lit = new Map(); this.delay = this.t instanceof MockTransport ? 0 : 8; this._status('connected'); }
     catch (e) { this._status(this.t.device ? 'disconnected' : 'idle', e.message); throw e; }
   }
   /** Re-open the already selected device (no picker). */
@@ -155,7 +161,7 @@ export class AuroraBoard extends EventTarget {
           await this.t.write(bytes.slice(i, i + CHUNK_SIZE));
           if (this.delay) await sleep(this.delay);
         }
-        if (this.delay > 12) this.delay = Math.max(12, this.delay - 4); // recover speed after a transient error
+        if (this.delay > 8) this.delay = Math.max(8, this.delay - 4); // recover speed after a transient error
         return;
       } catch (e) {
         if (attempt >= 2 || !this.connected) throw e;
@@ -178,7 +184,8 @@ export class AuroraBoard extends EventTarget {
       for (const pos of this.lit.keys()) if (!next.has(pos)) msg.push({ pos, r: 0, g: 0, b: 0 });
       if (!msg.length) return;
       msg.sort((a, b) => a.pos - b.pos);
-      try { await this._write(buildMessage(msg)); }
+      const t0 = performance.now();
+      try { await this._write(buildMessage(msg)); this.lastMs = Math.round(performance.now() - t0); }
       catch (e) { for (const [p, c] of next) this.lit.set(p, c); throw e; } // the board may have received it: remember, so the next update blacks it out
       this.lit = next;
     });

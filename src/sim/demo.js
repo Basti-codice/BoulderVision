@@ -88,8 +88,9 @@ export class DemoWorld {
     j.LW = { x: L.LH.x, y: L.LH.y + 19 }; j.RW = { x: L.RH.x, y: L.RH.y + 19 };
     j.LELB = { x: (j.LSH.x + j.LW.x) / 2 - 28, y: (j.LSH.y + j.LW.y) / 2 }; j.RELB = { x: (j.RSH.x + j.RW.x) / 2 + 28, y: (j.RSH.y + j.RW.y) / 2 };
     j.LFI = { x: L.LF.x, y: L.LF.y }; j.RFI = { x: L.RF.x, y: L.RF.y };
-    j.LA = { x: L.LF.x - 2, y: L.LF.y + 22 }; j.RA = { x: L.RF.x + 2, y: L.RF.y + 22 };
-    j.LHEEL = { x: L.LF.x - 3, y: L.LF.y + 32 }; j.RHEEL = { x: L.RF.x + 3, y: L.RF.y + 32 };
+    // toes rest on the hold, the ankle is ~10 cm above it, the heel in between
+    j.LA = { x: L.LF.x - 2, y: L.LF.y - 28 }; j.RA = { x: L.RF.x + 2, y: L.RF.y - 28 };
+    j.LHEEL = { x: L.LF.x - 3, y: L.LF.y - 20 }; j.RHEEL = { x: L.RF.x + 3, y: L.RF.y - 20 };
     j.LKNEE = { x: (j.LHIP.x + j.LA.x) / 2 - 24, y: (j.LHIP.y + j.LA.y) / 2 }; j.RKNEE = { x: (j.RHIP.x + j.RA.x) / 2 + 24, y: (j.RHIP.y + j.RA.y) / 2 };
     j.HEAD = { x: S.x, y: S.y - 70 };
     return j;

@@ -7,8 +7,8 @@ export const LIMBS = ['LH', 'RH', 'LF', 'RF'];
 export const DEFAULTS = {
   tolCm: 2.5,      // a limb point within this distance of a hold outline counts as "on" it
   releaseK: 1.8,   // contact is kept until the point is > tolCm*releaseK away
-  onMs: 120,       // must hover over the same hold this long
-  offMs: 160,      // must be away this long to release
+  onMs: 90,        // must hover over the same hold this long
+  offMs: 120,      // must be away this long to release
   lostMs: 500,     // keep a contact this long while the limb is not tracked
   maxSpeedCmS: 90, // faster than this = swiping past, not touching
 };

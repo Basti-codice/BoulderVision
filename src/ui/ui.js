@@ -277,6 +277,10 @@ function LivePanel() {
       <label class="field"><span>Pose model</span><select value=${l.variant} onChange=${(e) => app.setVariant(e.target.value)} disabled=${st.demo}><option value="auto">Auto (best that runs smoothly)</option><option value="heavy">Heavy · most accurate</option><option value="full">Full · balanced</option><option value="lite">Lite · fastest</option></select></label>
       ${l.running && html`<p class="hint">Running: ${l.activeVariant} (${l.delegate}) · ${l.fps} fps · ${l.latency} ms per frame</p>`}
       <${Slider} label="Contact tolerance" value=${l.tolCm} min=${0.5} max=${6} step=${0.5} fmt=${(v) => `${v} cm`} lo="strict" hi="forgiving" onInput=${(v) => app.setLive({ tolCm: v })} />
+      <${Slider} label="Feet: shift up" value=${l.footUp} min=${-30} max=${40} step=${1} fmt=${(v) => `${v > 0 ? '+' : ''}${v} cm`} lo="lower" hi="higher" onInput=${(v) => app.setLive({ footUp: v })} />
+      <${Slider} label="Hands: shift up" value=${l.handUp} min=${-30} max=${40} step=${1} fmt=${(v) => `${v > 0 ? '+' : ''}${v} cm`} onInput=${(v) => app.setLive({ handUp: v })} />
+      <${Slider} label="Perspective correction" value=${l.parallax} min=${0} max=${0.4} step=${0.01} fmt=${(v) => `${Math.round(v * 100)}%`} lo="off" hi="camera very close" onInput=${(v) => app.setLive({ parallax: v })} />
+      <p class="hint">If hands or feet light the wrong hold: adjust while the climber holds still on a known hold. Raise the perspective correction when the camera is close to the wall and the error grows towards the edges.</p>
       <label class="field"><span>Climber faces</span><select value=${l.facing} onChange=${(e) => app.setLive({ facing: e.target.value })}><option value="wall">The wall (camera behind)</option><option value="camera">The camera</option></select></label>
       <label class="check"><input type="checkbox" checked=${l.swapLR} onChange=${(e) => app.setLive({ swapLR: e.target.checked })} /><span>Swap left / right</span></label>
     <//>
@@ -358,7 +362,7 @@ const hasWebGL = () => (_webgl ??= !!document.createElement('canvas').getContext
 function Diagnostics() {
   const st = S((s) => s);
   const [open, setOpen] = useState(false);
-  const info = { secureContext: window.isSecureContext, webgl: hasWebGL(), webBluetooth: BleTransport.supported(), webSerial: SerialSink.supported(), camera: st.cam.label, frame: `${st.cam.width}x${st.cam.height}@${st.cam.fps}`, pose: `${st.live.activeVariant || '-'} / ${st.live.delegate || '-'}`, poseFps: st.live.fps, poseLatencyMs: st.live.latency, board: st.board.state, holds: st.holds.length, leds: st.board.leds.length, userAgent: navigator.userAgent };
+  const info = { secureContext: window.isSecureContext, webgl: hasWebGL(), webBluetooth: BleTransport.supported(), webSerial: SerialSink.supported(), camera: st.cam.label, frame: `${st.cam.width}x${st.cam.height}@${st.cam.fps}`, pose: `${st.live.activeVariant || '-'} / ${st.live.delegate || '-'}`, poseFps: st.live.fps, poseLatencyMs: st.live.latency, board: st.board.state, ledUpdateMs: app.board?.lastMs ?? '-', bleWrite: app.board?.t?.fast === false ? 'with response' : 'without response (fast)', holds: st.holds.length, leds: st.board.leds.length, userAgent: navigator.userAgent };
   return html`<div class="diag"><button class="linkbtn" onClick=${() => setOpen(!open)}>Diagnostics</button>${open && html`<pre>${Object.entries(info).map(([k, v]) => `${k}: ${v}`).join('\n')}</pre><button class="linkbtn" onClick=${() => navigator.clipboard?.writeText(JSON.stringify(info, null, 1))}>Copy report</button>`}</div>`;
 }
 

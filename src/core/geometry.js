@@ -209,23 +209,49 @@ export function isValidQuad(q) {
   return polygonArea(q) > 100;
 }
 
+function clipHalfPlane(poly, px, py, nx, ny, keep) {
+  // keep the part where keep * ((x - p) . n) <= 0 (Sutherland-Hodgman against one line)
+  const side = ([x, y]) => keep * ((x - px) * nx + (y - py) * ny);
+  const out = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length], sa = side(a), sb = side(b);
+    if (sa <= 0) out.push(a);
+    if ((sa < 0 && sb > 0) || (sa > 0 && sb < 0)) { const t = sa / (sa - sb); out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]); }
+  }
+  return out;
+}
+
+function segCross(a, b, c, d) {
+  const o = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+  return o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0;
+}
+export function polygonsOverlap(A, B) {
+  if (A.some(([x, y]) => pointInPolygon(B, x, y)) || B.some(([x, y]) => pointInPolygon(A, x, y))) return true;
+  for (let i = 0; i < A.length; i++) for (let j = 0; j < B.length; j++) if (segCross(A[i], A[(i + 1) % A.length], B[j], B[(j + 1) % B.length])) return true;
+  return false;
+}
+
 /**
- * Holds that touch can end up with overlapping outlines (their hulls overlap). Pull vertices that lie inside a
- * neighbour back towards their own centre until the outlines separate. Mutates the given holds ({poly, cx, cy}).
+ * Touching holds end up with overlapping outlines. Cut every overlapping pair along the line between their centres
+ * (placed in proportion to their sizes), so each outline keeps its own side and they never overlap.
+ * Mutates the given holds ({poly, cx, cy, area}).
  */
-export function resolveOverlaps(holds, iterations = 12) {
+export function resolveOverlaps(holds, passes = 3) {
   const boxes = holds.map((h) => bbox(h.poly));
   const hit = (a, b) => !(a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0);
-  for (let it = 0; it < iterations; it++) {
+  for (let pass = 0; pass < passes; pass++) {
     let changed = false;
     for (let i = 0; i < holds.length; i++) for (let j = i + 1; j < holds.length; j++) {
-      if (!hit(boxes[i], boxes[j])) continue;
-      for (const [a, b] of [[holds[i], holds[j]], [holds[j], holds[i]]]) {
-        const [cx, cy] = polygonCentroid(a.poly);
-        let moved = false;
-        a.poly = a.poly.map(([x, y]) => { if (!pointInPolygon(b.poly, x, y)) return [x, y]; moved = true; return [cx + (x - cx) * 0.85, cy + (y - cy) * 0.85]; });
-        if (moved) { changed = true; boxes[holds.indexOf(a)] = bbox(a.poly); }
-      }
+      if (!hit(boxes[i], boxes[j]) || !polygonsOverlap(holds[i].poly, holds[j].poly)) continue;
+      const A = holds[i], B = holds[j], ca = polygonCentroid(A.poly), cb = polygonCentroid(B.poly);
+      const d = Math.hypot(cb[0] - ca[0], cb[1] - ca[1]);
+      if (d < 1e-6) continue;
+      const ra = Math.sqrt(polygonArea(A.poly) / Math.PI), rb = Math.sqrt(polygonArea(B.poly) / Math.PI);
+      const nx = (cb[0] - ca[0]) / d, ny = (cb[1] - ca[1]) / d, t = (d * ra) / (ra + rb), px = ca[0] + nx * t, py = ca[1] + ny * t;
+      const pa = clipHalfPlane(A.poly, px, py, nx, ny, 1), pb = clipHalfPlane(B.poly, px, py, nx, ny, -1);
+      if (pa.length >= 3) { A.poly = pa; boxes[i] = bbox(pa); }
+      if (pb.length >= 3) { B.poly = pb; boxes[j] = bbox(pb); }
+      changed = true;
     }
     if (!changed) break;
   }

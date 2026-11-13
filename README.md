@@ -54,7 +54,10 @@ you only re-mark the corners (or use **Auto-align with LEDs**) and go live.
 * Robustness: while no climber is found the app searches the wall in overlapping tiles and tries the image upright and
   rotated by 90 degrees (horizontal bodies on steep walls confuse the model); once found, a tight crop follows the
   climber and the rotation is only changed when hands/feet are clearly better visible in another orientation.
-* Hold detection ignores people standing in the picture while the wall is captured (skeleton mask).
+* Hold detection ignores people standing in the picture while the wall is captured (skeleton mask). The wall colour is
+  estimated from cells where one colour clearly dominates (smooth surface fit), so crowded areas and vignetting do not
+  hide holds; touching holds are split and their outlines are cut along the line between them so they never overlap.
+* Contact tuning (Live panel): feet/hands up-shift and a perspective correction for cameras close to the wall.
 
 ## Output interface
 

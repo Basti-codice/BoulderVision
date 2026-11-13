@@ -111,14 +111,16 @@ export function limbPoints(lm, W, H, { swap = false, minVis = 0.25 } = {}) {
     if (w) return [w];
     return null;
   };
-  const foot = (toe, heel) => {
-    const t = g(toe), hl = g(heel);
-    if (t && hl) return [t, { x: hl.x + (t.x - hl.x) * 0.75, y: hl.y + (t.y - hl.y) * 0.75 }];
-    if (t) return [t];
-    return null;
+  // Contact point of a foot: the toe tip hangs far below where a climbing shoe rests on a hold, so aim between ankle and toe.
+  const foot = (ankle, heel, toe) => {
+    const an = g(ankle), t = g(toe), hl = g(heel);
+    if (an && t) return [{ x: an.x + (t.x - an.x) * 0.4, y: an.y + (t.y - an.y) * 0.4 }, { x: an.x + (t.x - an.x) * 0.7, y: an.y + (t.y - an.y) * 0.7 }];
+    if (an) return [an];
+    if (t && hl) return [{ x: hl.x + (t.x - hl.x) * 0.5, y: hl.y + (t.y - hl.y) * 0.5 }];
+    return t ? [t] : null;
   };
-  const L = { hand: hand(LM.LW, LM.LP, LM.LI), foot: foot(LM.LFI, LM.LHEEL) };
-  const R = { hand: hand(LM.RW, LM.RP, LM.RI), foot: foot(LM.RFI, LM.RHEEL) };
+  const L = { hand: hand(LM.LW, LM.LP, LM.LI), foot: foot(LM.LA, LM.LHEEL, LM.LFI) };
+  const R = { hand: hand(LM.RW, LM.RP, LM.RI), foot: foot(LM.RA, LM.RHEEL, LM.RFI) };
   return swap ? { LH: R.hand, RH: L.hand, LF: R.foot, RF: L.foot } : { LH: L.hand, RH: R.hand, LF: L.foot, RF: R.foot };
 }
 
