@@ -258,3 +258,16 @@ export function resolveOverlaps(holds, passes = 3) {
   for (const h of holds) { const [cx, cy] = polygonCentroid(h.poly); h.cx = cx; h.cy = cy; h.area = polygonArea(h.poly); }
   return holds;
 }
+
+/** Area of the intersection of polygon `subject` with CONVEX polygon `clip` (Sutherland-Hodgman, one edge at a time). */
+export function intersectionArea(subject, clip) {
+  let poly = subject;
+  const cc = polygonCentroid(clip);
+  for (let i = 0; i < clip.length && poly.length >= 3; i++) {
+    const a = clip[i], b = clip[(i + 1) % clip.length], ex = b[0] - a[0], ey = b[1] - a[1], l = Math.hypot(ex, ey) || 1;
+    let nx = ey / l, ny = -ex / l; // outward normal (orientation-independent via the centroid test)
+    if ((cc[0] - a[0]) * nx + (cc[1] - a[1]) * ny > 0) { nx = -nx; ny = -ny; }
+    poly = clipHalfPlane(poly, a[0], a[1], nx, ny, 1);
+  }
+  return poly.length >= 3 ? polygonArea(poly) : 0;
+}

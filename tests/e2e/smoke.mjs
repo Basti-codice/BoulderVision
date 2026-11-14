@@ -63,6 +63,66 @@ const edit = await page.evaluate(() => {
 });
 check('remove/undo/add', edit.n1 === edit.n0 - 1 && edit.n2 === edit.n0 && edit.n3 === edit.n0 && edit.addedOk, JSON.stringify(edit));
 
+// --- state: delete everything, detect again (used to leave ~15 holds because deletions were remembered)
+const del = await page.evaluate(async () => {
+  const a = window.__bv, n0 = a.holds.filter((h) => !h.ghost).length;
+  a.removeInRegion({ x0: -10, y0: -10, x1: 1e4, y1: 1e4 });
+  const afterDelete = a.holds.length;
+  a.setDetectParam({ sensitivity: 0.9 }); await new Promise((r) => setTimeout(r, 300)); // sliders must not resurrect deleted holds
+  const afterSlider = a.holds.length;
+  await a.runDetect();
+  return { n0, afterDelete, afterSlider, n1: a.holds.filter((h) => !h.ghost).length };
+});
+console.log('   delete-all', JSON.stringify(del));
+check('delete all stays empty while sliders move', del.afterDelete === 0 && del.afterSlider === 0);
+check('detect after delete-all finds the same holds again', del.n1 >= del.n0 * 0.95, `${del.n1} vs ${del.n0}`);
+
+// --- sliders: instant, monotone, stable ids, one undo entry per gesture
+const sl = await page.evaluate(async () => {
+  const a = window.__bv, wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  a.setDetectParam({ sensitivity: 0.5 }); await wait(250);
+  const base = new Map(a.holds.filter((h) => !h.ghost && h.cand != null).map((h) => [h.cand, h.id]));
+  const hist0 = a.history.length;
+  a.setDetectParam({ sensitivity: 0.2 }); await wait(250); a.setDetectParam({ sensitivity: 0.3 }); await wait(250);
+  const low = new Map(a.holds.filter((h) => !h.ghost && h.cand != null).map((h) => [h.cand, h.id]));
+  a.setDetectParam({ sensitivity: 0.8 }); await wait(250);
+  const high = new Map(a.holds.filter((h) => !h.ghost && h.cand != null).map((h) => [h.cand, h.id]));
+  await wait(700);
+  const sameIds = [...low].every(([c, id]) => !base.has(c) || base.get(c) === id) && [...base].every(([c, id]) => !high.has(c) || high.get(c) === id);
+  const subset = [...low.keys()].every((c) => high.has(c));
+  a.setDetectParam({ sensitivity: 0.5 }); await wait(700);
+  return { base: base.size, low: low.size, high: high.size, sameIds, subset, historyAdded: a.history.length - hist0 };
+});
+console.log('   sliders', JSON.stringify(sl));
+check('sensitivity is monotone (more sensitive = superset)', sl.subset && sl.low <= sl.base && sl.base <= sl.high);
+check('hold ids stay stable while the slider moves', sl.sameIds);
+check('slider gestures do not flood the undo history', sl.historyAdded <= 4, `+${sl.historyAdded}`);
+
+// --- new photo: old detection must not be shown or reused
+await page.click('.step:has-text("Camera")');
+await page.click('.seg button:has-text("File")');
+await page.setInputFiles('input[type=file][accept="video/*,image/*"]', new globalThis.URL('../fixtures/dense-wall.jpg', import.meta.url).pathname);
+await page.waitForFunction(() => window.__bv.s.cam.kind === 'image', null, { timeout: 15000 });
+const np = await page.evaluate(() => { const a = window.__bv; return { stale: a.s.detect.stale, analysis: !!a.analysis, hasAnalysis: a.s.detect.hasAnalysis, snapValid: a.snapshotValid, w: a.source.width, corners: a.s.corners.map((c) => c.map(Math.round)) }; });
+console.log('   new photo', JSON.stringify(np));
+check('new photo: old analysis and snapshot are dropped, holds flagged', np.stale && !np.analysis && !np.hasAnalysis && !np.snapValid);
+check('new photo: corners restart inside the new picture', np.w === 800 && np.corners.every(([x, y]) => x >= 0 && x <= 800 && y >= 0 && y <= 800));
+await shot('04b-new-photo-banner');
+const dn = await page.evaluate(async () => {
+  const a = window.__bv; a.set({ wall: { wm: 3.6, hm: 3.6 } });
+  a.setCorners([[0, 0], [800, 0], [800, 800], [0, 800]]);
+  await a.detectReplacing();
+  const hs = a.holds.filter((h) => !h.ghost), nested = hs.filter((x, i) => hs.some((y, j) => j !== i && y.area > x.area && y.poly.some(() => false))).length;
+  return { n: hs.length, stale: a.s.detect.stale, hasAnalysis: a.s.detect.hasAnalysis, snapValid: a.snapshotValid };
+});
+console.log('   detect on new photo', JSON.stringify(dn));
+check('detect on the new photo works (dense wall, ~490 holds)', dn.n > 440 && dn.n < 560 && !dn.stale && dn.hasAnalysis && dn.snapValid, `${dn.n} holds`);
+await page.evaluate(() => { const a = window.__bv; a.useFile && 0; });
+
+// back to the demo wall for the remaining checks
+await page.evaluate(async () => { const a = window.__bv; await a.startDemo(); a.setCorners(a.world.corners.map((c) => c.slice())); await a.runDetect(); });
+await page.waitForFunction(() => window.__bv.holds.length > 150, null, { timeout: 60000 });
+
 // --- LED scan through the UI
 await page.click('.step:has-text("Board")');
 // typing into the LED range field must not be reset by re-renders (camera fps updates every second)

@@ -54,6 +54,12 @@ you only re-mark the corners (or use **Auto-align with LEDs**) and go live.
 * Robustness: while no climber is found the app searches the wall in overlapping tiles and tries the image upright and
   rotated by 90 degrees (horizontal bodies on steep walls confuse the model); once found, a tight crop follows the
   climber and the rotation is only changed when hands/feet are clearly better visible in another orientation.
+* Detection works in two stages: the wall is segmented **once per photo** into hold candidates (with colour distance, edge
+  contrast, size, shape); the sliders (*Sensitivity*, *Edge contrast*, size limits) only filter these candidates. That makes
+  them instant and monotone (more sensitive = superset), and hold ids stay stable while you move them. Bolt holes do not split
+  a hold, glued groups are re-split instead of dropped, and tails between touching holds are cut off.
+* A new photo, wall size, rotation or moved corners invalidates the analysis (the app tells you); deleted holds are remembered
+  only for the current analysis, so *Detect* always starts fresh. *Clear all* and *Reset to auto* are in the Holds step.
 * Hold detection ignores people standing in the picture while the wall is captured (skeleton mask). The wall colour is
   estimated from cells where one colour clearly dominates (smooth surface fit), so crowded areas and vignetting do not
   hide holds; touching holds are split and their outlines are cut along the line between them so they never overlap.

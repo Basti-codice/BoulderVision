@@ -91,3 +91,30 @@ for (const [name, o] of [['dense wall with strong vignette (crowded edge cells)'
     assert.equal(overlaps, 0, 'outlines must not overlap');
   });
 }
+
+import fs from 'node:fs';
+import zlib from 'node:zlib';
+import { segmentHolds, filterHolds } from '../../src/cv/holds.js';
+
+// Real photo of a very dense wall (bolt-hole in every hold, holds almost touching, ~490 holds) that exposed duplicate
+// outlines and a chaotic sensitivity slider. 800x800, wall assumed 3.6 m.
+test('real dense wall photo: stable count, monotone sliders, no duplicate outlines', () => {
+  const raw = zlib.gunzipSync(fs.readFileSync(new URL('../fixtures/dense-wall.rgba.gz', import.meta.url)));
+  const img = { data: new Uint8ClampedArray(raw.buffer, raw.byteOffset, raw.length), width: 800, height: 800 };
+  const seg = segmentHolds(analyzeWall(img), 800 / 360);
+  const at = (s) => filterHolds(seg, { sensitivity: s });
+  const counts = [0.2, 0.4, 0.5, 0.6, 0.8].map((s) => at(s).length);
+  assert.ok(counts.every((n) => n > 440 && n < 540), `counts ${counts}`);
+  assert.ok((Math.max(...counts) - Math.min(...counts)) / Math.min(...counts) < 0.06, `count varies too much: ${counts}`);
+  // monotone: a more sensitive setting never loses a hold
+  const ids = [0, 0.25, 0.5, 0.75, 1].map((s) => new Set(at(s).map((h) => h.idx)));
+  for (let i = 1; i < ids.length; i++) for (const id of ids[i - 1]) assert.ok(ids[i].has(id), 'sensitivity must only add holds');
+  // one outline per hold
+  const hs = at(0.5).map((h) => ({ ...h }));
+  const nested = hs.filter((a, i) => hs.some((b, j) => j !== i && b.area > a.area && pointInPolygon(b.poly, a.cx, a.cy))).length;
+  assert.ok(nested <= hs.length * 0.01, `${nested} nested outlines`);
+  resolveOverlaps(hs);
+  for (let i = 0; i < hs.length; i++) for (let j = i + 1; j < hs.length; j++) assert.ok(!polygonsOverlap(hs[i].poly, hs[j].poly), 'outlines must not overlap');
+  // the automatic minimum size is fixed per photo: the sliders cannot change it
+  assert.equal(filterHolds(seg, { sensitivity: 1 }).length >= filterHolds(seg, { sensitivity: 0 }).length, true);
+});

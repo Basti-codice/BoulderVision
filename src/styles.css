@@ -127,3 +127,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .roles button i { width: 12px; height: 12px; border-radius: 50%; background: var(--c); box-shadow: 0 0 8px var(--c); }
 .roles button b { margin-left: auto; font-family: var(--mono); color: var(--muted); font-weight: 600; }
 .roles button.on { border-color: var(--c); background: color-mix(in srgb, var(--c) 16%, var(--panel2)); }
+
+.slider.off { opacity: .45; }
+.col-btns { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.stale-wrap { padding: 12px 12px 0; }

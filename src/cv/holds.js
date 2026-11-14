@@ -5,7 +5,7 @@
 //            -> opening -> distance transform -> persistence watershed (splits touching holds)
 //            -> per-region convex hull, filtered by size / shape.
 
-import { convexHull, simplifyPolygon, offsetPolygon, polygonArea, polygonCentroid } from '../core/geometry.js';
+import { convexHull, simplifyPolygon, offsetPolygon, polygonArea, polygonCentroid, pointInPolygon } from '../core/geometry.js';
 
 // ---------- analysis (expensive, once per snapshot) ----------
 
@@ -247,18 +247,55 @@ function hysteresis(dE, w, h, low, high) {
   return out;
 }
 
-function regionsFromLabels(label, w, h) {
+/** Background islands that are fully enclosed and small (bolt holes, dark centre of a hold) become foreground. */
+function fillSmallHoles(mask, w, h, maxArea) {
+  const seen = new Uint8Array(w * h), out = mask.slice();
+  for (let s = 0; s < w * h; s++) {
+    if (mask[s] || seen[s]) continue;
+    const stack = [s], comp = [];
+    let touches = false;
+    seen[s] = 1;
+    while (stack.length) {
+      const i = stack.pop(), x = i % w, y = (i / w) | 0;
+      comp.push(i);
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) touches = true;
+      if (comp.length > maxArea) { touches = true; } // too big to be a hole: stop caring about its exact extent
+      if (x > 0 && !mask[i - 1] && !seen[i - 1]) { seen[i - 1] = 1; stack.push(i - 1); }
+      if (x < w - 1 && !mask[i + 1] && !seen[i + 1]) { seen[i + 1] = 1; stack.push(i + 1); }
+      if (y > 0 && !mask[i - w] && !seen[i - w]) { seen[i - w] = 1; stack.push(i - w); }
+      if (y < h - 1 && !mask[i + w] && !seen[i + w]) { seen[i + w] = 1; stack.push(i + w); }
+    }
+    if (!touches) for (const i of comp) out[i] = 1;
+  }
+  return out;
+}
+
+/** Statistics per watershed region: area, moments, edge pixels, mean colour distance, deepest distance-transform value. */
+function extractRegions(label, dt, dE, w, h) {
   const map = new Map();
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const l = label[y * w + x];
+    const i = y * w + x, l = label[i];
     if (!l) continue;
     let r = map.get(l);
-    if (!r) { r = { area: 0, sx: 0, sy: 0, sxx: 0, sxy: 0, syy: 0, edge: [], touches: false }; map.set(l, r); }
-    r.area++; r.sx += x; r.sy += y; r.sxx += x * x; r.sxy += x * y; r.syy += y * y;
-    if (x === 0 || y === 0 || x === w - 1 || y === h - 1) r.touches = true;
-    if (x === 0 || y === 0 || x === w - 1 || y === h - 1 || label[y * w + x - 1] !== l || label[y * w + x + 1] !== l || label[(y - 1) * w + x] !== l || label[(y + 1) * w + x] !== l) r.edge.push([x + 0.5, y + 0.5]);
+    if (!r) { r = { id: l, area: 0, sx: 0, sy: 0, sxx: 0, sxy: 0, syy: 0, dE: 0, maxDt: 0, edge: [], core: [], touches: false }; map.set(l, r); }
+    r.area++; r.sx += x; r.sy += y; r.sxx += x * x; r.sxy += x * y; r.syy += y * y; r.dE += dE[i];
+    if (dt[i] > r.maxDt) r.maxDt = dt[i];
+    const border = x === 0 || y === 0 || x === w - 1 || y === h - 1;
+    if (border) r.touches = true;
+    if (border || label[i - 1] !== l || label[i + 1] !== l || label[i - w] !== l || label[i + w] !== l) r.edge.push([x + 0.5, y + 0.5]);
   }
-  return map;
+  // "core" outline: pixels deeper than a fraction of the region's own radius. Thin tails and bridges to neighbours
+  // are shallower than that, so the outline built from it follows the hold and not the tails.
+  for (const r of map.values()) r.cut = Math.max(1.5, 0.3 * r.maxDt);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x, l = label[i];
+    if (!l) continue;
+    const r = map.get(l);
+    if (dt[i] < r.cut) continue;
+    const deep = (j) => label[j] === l && dt[j] >= r.cut;
+    if (!deep(i - 1) || !deep(i + 1) || !deep(i - w) || !deep(i + w)) r.core.push([x + 0.5, y + 0.5]);
+  }
+  return [...map.values()];
 }
 
 /** Elongation (major/minor axis ratio) from the second moments of a region. */
@@ -270,55 +307,95 @@ function elongation(r) {
   return Math.sqrt(l1 / l2);
 }
 
-function toHold(r, pxPerCm) {
-  const hull = convexHull(r.edge);
-  if (hull.length < 3) return null;
-  const poly = simplifyPolygon(offsetPolygon(hull, 0.5), 10);
+function regionToCandidate(r, pxPerCm) {
+  const edgeHull = convexHull(r.edge);
+  if (edgeHull.length < 3) return null;
+  const coreHull = r.core.length >= 6 ? convexHull(r.core) : [];
+  // Prefer the tail-free outline (core grown back by its cut depth) when the region has tails; else the plain hull.
+  const grown = coreHull.length >= 3 ? offsetPolygon(coreHull, r.cut * 0.9) : null;
+  const useCore = grown && polygonArea(edgeHull) > 1.15 * polygonArea(grown);
+  const poly = simplifyPolygon(offsetPolygon(useCore ? grown : edgeHull, 0.5), 10);
   const [cx, cy] = polygonCentroid(poly);
-  const hullArea = polygonArea(hull);
-  return {
-    cx, cy, poly,
-    area: r.area,
-    solidity: r.area / Math.max(1, hullArea),
-    diaCm: (2 * Math.sqrt(r.area / Math.PI)) / pxPerCm,
+  return { cx, cy, poly, area: r.area, solidity: r.area / Math.max(1, polygonArea(useCore ? grown : edgeHull)), diaCm: (2 * Math.sqrt(r.area / Math.PI)) / pxPerCm, score: r.dE / r.area, edge: r.edge, elong: elongation(r), touches: r.touches };
+}
+
+const SEG_VERSION = 3;
+
+/**
+ * Segment the wall ONCE per photo into hold candidates, each with measurements (colour distance to the wall, edge
+ * contrast, size, shape). The sliders only filter these candidates (filterHolds), so they are instant, monotone
+ * (more sensitive = superset) and never re-segment. Result is cached on the analysis.
+ */
+export function segmentHolds(analysis, pxPerCm) {
+  if (analysis._seg && analysis._seg.pxPerCm === pxPerCm && analysis._seg.version === SEG_VERSION) return analysis._seg;
+  const { width: w, height: h, dE, otsu } = analysis;
+  const high = Math.max(10, otsu * 0.5), low = high * 0.6;           // permissive: the sliders do the selecting
+  let mask = hysteresis(dE, w, h, low, high);
+  mask = dilate(erode(mask, w, h), w, h);                             // opening: kills specks / thin streaks
+  mask = fillSmallHoles(mask, w, h, Math.round(2.5 * pxPerCm * pxPerCm)); // bolt holes must not split a hold
+  const dt = distanceTransform(mask, w, h);
+  const label = watershed(dt, mask, w, h, Math.max(1.5, 0.6 * pxPerCm)); // necks shallower than ~0.6 cm do not split
+  const cands = [], retry = new Set();
+  const accept = (r, strict) => {
+    const dia = (2 * Math.sqrt(r.area / Math.PI)) / pxPerCm;
+    if (dia < 1.2 || dia > 45) return 'drop';
+    const el = elongation(r);
+    if (el > 5 || (r.touches && el > 2.6)) return 'drop';
+    const c = regionToCandidate(r, pxPerCm);
+    if (!c) return 'drop';
+    if (c.solidity < (strict ? 0.6 : 0.65) || (!strict && dia > 22)) return strict ? 'drop' : 'retry'; // glued group: split harder
+    cands.push(c);
+    return 'ok';
   };
+  for (const r of extractRegions(label, dt, dE, w, h)) if (accept(r, false) === 'retry') retry.add(r.id);
+  if (retry.size) { // second chance: re-split only the glued groups with the finest setting instead of throwing them away
+    const m2 = new Uint8Array(w * h);
+    for (let i = 0; i < m2.length; i++) if (retry.has(label[i])) m2[i] = 1;
+    const dt2 = distanceTransform(m2, w, h), label2 = watershed(dt2, m2, w, h, 1.0);
+    for (const r of extractRegions(label2, dt2, dE, w, h)) accept(r, true);
+  }
+  // a fragment that lies inside a clearly bigger candidate is part of that hold
+  cands.sort((a, b) => b.area - a.area);
+  const kept = [];
+  for (const c of cands) if (!kept.some((b) => c.area < 0.6 * b.area && pointInPolygon(b.poly, c.cx, c.cy))) kept.push(c);
+  // edge contrast: colour distance inside minus the wall right next to the outline (not neighbouring holds)
+  for (const c of kept) {
+    let sum = 0, n = 0;
+    for (let k = 0; k < c.edge.length; k += 3) {
+      const [ex, ey] = c.edge[k];
+      for (const [dx, dy] of [[4, 0], [-4, 0], [0, 4], [0, -4]]) {
+        const x = Math.round(ex + dx), y = Math.round(ey + dy);
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        const j = y * w + x;
+        if (!label[j] && !mask[j]) { sum += dE[j]; n++; }
+      }
+    }
+    c.contrast = n >= 6 ? c.score - sum / n : c.score; // fully surrounded by holds: nothing to compare with, no penalty
+    delete c.edge;
+  }
+  kept.sort((a, b) => a.cy - b.cy || a.cx - b.cx);
+  kept.forEach((c, i) => { c.idx = i; });
+  const good = kept.filter((c) => c.solidity >= 0.7 && c.score >= 0.6 * otsu).map((c) => c.diaCm).sort((a, b) => a - b);
+  const medianDia = good.length ? good[good.length >> 1] : 0;
+  analysis._seg = { version: SEG_VERSION, pxPerCm, candidates: kept, medianDia, minDiaEff: Math.max(1.5, 0.4 * medianDia), otsu };
+  return analysis._seg;
 }
 
 /**
- * analysis: result of analyzeWall.  params:
- *  sensitivity 0..1 (default .5), minDiaCm, maxDiaCm, pxPerCm, region {x0,y0,x1,y1}? (only keep holds whose centre lies inside)
+ * Pick candidates by the slider values. All criteria are simple thresholds on measurements, so raising sensitivity
+ * can only ADD holds. sensitivity 0..1: weakest accepted colour distance; contrast 0..1: weakest accepted edge
+ * contrast (0 = off); minDiaCm 0 = automatic (fixed per photo); region {x0,y0,x1,y1}: only holds centred inside.
  */
+export function filterHolds(seg, { sensitivity = 0.5, contrast = 0.25, minDiaCm = 0, maxDiaCm = 30, region = null } = {}) {
+  const minScore = seg.otsu * (1.05 - 0.75 * sensitivity), minContrast = seg.otsu * 0.7 * contrast, minDia = minDiaCm > 0 ? minDiaCm : seg.minDiaEff;
+  return seg.candidates.filter((c) => c.score >= minScore && c.contrast >= minContrast && c.diaCm >= minDia && c.diaCm <= maxDiaCm
+    && !(region && (c.cx < region.x0 || c.cx > region.x1 || c.cy < region.y0 || c.cy > region.y1)));
+}
+
+/** Convenience (tests, single calls): segment (cached) and filter. */
 export function detectHolds(analysis, params) {
-  const { width: w, height: h, dE, otsu } = analysis;
-  const { sensitivity = 0.5, minDiaCm = 0, maxDiaCm = 30, pxPerCm, region = null } = params;
-  const high = Math.max(10, otsu * (1.3 - 0.7 * sensitivity));
-  const low = high * 0.6;
-  let mask = hysteresis(dE, w, h, low, high);
-  mask = dilate(erode(mask, w, h), w, h); // opening: kills specks / thin streaks
-  const dt = distanceTransform(mask, w, h);
-  const label = watershed(dt, mask, w, h, Math.max(1.0, 0.28 * pxPerCm)); // small: touching holds must separate
-  // candidates: plausible size and shape (wall frames, edges and streaks are long and thin)
-  const cands = [];
-  for (const r of regionsFromLabels(label, w, h).values()) {
-    const dia = (2 * Math.sqrt(r.area / Math.PI)) / pxPerCm;
-    if (dia < 1.2 || dia > maxDiaCm) continue;
-    const el = elongation(r);
-    if (el > 5 || (r.touches && el > 2.6)) continue;
-    cands.push({ r, dia });
-  }
-  // minDiaCm = 0 means "automatic": a fraction of the typical hold, so specks never count whatever the wall size input
-  const dias = cands.map((c) => c.dia).sort((a, b) => a - b);
-  const median = dias.length ? dias[dias.length >> 1] : 0;
-  const minEff = minDiaCm > 0 ? minDiaCm : Math.max(1.5, 0.4 * median);
-  const out = [];
-  for (const { r, dia } of cands) {
-    if (dia < minEff) continue;
-    const hold = toHold(r, pxPerCm);
-    if (!hold || hold.solidity < 0.55) continue;
-    if (region && (hold.cx < region.x0 || hold.cx > region.x1 || hold.cy < region.y0 || hold.cy > region.y1)) continue;
-    out.push(hold);
-  }
-  return { holds: out, thresholds: { low, high, otsu, minDiaEff: minEff, medianDia: median } };
+  const seg = segmentHolds(analysis, params.pxPerCm);
+  return { holds: filterHolds(seg, params).map((c) => ({ ...c })), thresholds: { otsu: seg.otsu, minDiaEff: seg.minDiaEff, medianDia: seg.medianDia } };
 }
 
 /** Grow a single hold around a click. Returns a hold or null. */

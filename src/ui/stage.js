@@ -46,7 +46,7 @@ export class Stage {
     const rawStep = s.mode === 'setup' && (s.step === 'camera' || s.step === 'align');
     if (app.source.active && (rawStep || !app.Himg2wall)) return 'raw';
     if (app.source.active) return 'wall';
-    if (app.snapshotBitmap && s.step !== 'camera') return 'wall';
+    if (app.snapshotValid && s.step !== 'camera') return 'wall';
     return 'none';
   }
   content(mode) {
@@ -78,7 +78,7 @@ export class Stage {
   draw() {
     const s = this.store.get(), app = this.app, mode = this.mode(s), ctx = this.octx;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0); ctx.clearRect(0, 0, this.w, this.h);
-    const useSnap = mode === 'wall' && s.mode === 'setup' && s.step === 'holds' && app.snapshotBitmap;
+    const useSnap = mode === 'wall' && s.mode === 'setup' && s.step === 'holds' && app.snapshotValid;
     const showRaw = mode === 'raw', showGL = mode === 'wall' && !useSnap && app.source.active && this.warper.ok && !!app.Himg2wall;
     this.raw.style.display = showRaw ? 'block' : 'none'; this.gl.style.display = showGL ? 'block' : 'none';
     this.el.dataset.mode = mode;

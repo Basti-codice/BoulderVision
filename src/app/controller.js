@@ -3,12 +3,12 @@ import { createStore } from '../store/store.js';
 import { FrameSource } from '../core/camera.js';
 import { Warper, warpCPU } from '../core/warp.js';
 import { wallSize } from '../core/wall.js';
-import { resolveOverlaps, wallHomography, invert3, applyH, solveHomography, isValidQuad, pointInPolygon, polygonDistance, ellipsePolygon, polygonCentroid, polygonArea, orderCorners } from '../core/geometry.js';
+import { intersectionArea, resolveOverlaps, wallHomography, invert3, applyH, solveHomography, isValidQuad, pointInPolygon, polygonDistance, ellipsePolygon, polygonCentroid, polygonArea, orderCorners } from '../core/geometry.js';
 import { OneEuro2D } from '../core/filters.js';
 import { bindLeds } from '../core/binding.js';
 import { ContactTracker, LIMBS } from '../core/contact.js';
 import { numberHolds } from '../core/numbering.js';
-import { analyzeWall, detectHolds, fitHoldAt } from '../cv/holds.js';
+import { analyzeWall, segmentHolds, filterHolds, fitHoldAt } from '../cv/holds.js';
 import { scanLayout, spotImage, findSpots, decodeSpots, pickVerifySet, verifyMapping, brightestSpot } from '../cv/calibrate.js';
 import { AuroraBoard, BleTransport } from '../board/aurora.js';
 import { PoseEngine, SKELETON, pickClimber, limbPoints, limbQuality, SideGuard, VARIANTS } from '../pose/pose.js';
@@ -29,7 +29,7 @@ export const store = createStore({
   wall: { wm: 3.6, hm: 3.6 }, corners: null,
   cam: { status: 'off', kind: 'none', label: '', width: 0, height: 0, fps: 0, devices: [], deviceId: '', res: 1080, rotation: 0, mirror: false, locked: false, lockMsg: '', error: '' },
   holds: [], tool: 'select', selected: null, numbering: 'rows', numberStart: 1, canUndo: false, canRedo: false,
-  detect: { sensitivity: 0.5, minDia: 0, maxDia: 30, effMin: 0, busy: false, hasAnalysis: false, message: '' },
+  detect: { sensitivity: 0.5, contrast: 0.25, minDia: 0, maxDia: 30, effMin: 0, busy: false, hasAnalysis: false, stale: false, message: '' },
   board: { state: 'idle', name: '', ledCount: 1024, leds: [], rejected: 0, testing: null, scan: { running: false, progress: 0, message: '', result: null, verify: null }, align: { running: false, message: '' } },
   live: { footUp: 0, handUp: 0, parallax: 0, running: false, loading: false, variant: 'auto', activeVariant: '', delegate: '', fps: 0, latency: 0, person: false, contacts: { LH: null, RH: null, LF: null, RF: null }, tolCm: 2.5, facing: 'wall', swapLR: false, lightBoard: false, error: '' },
   outputs: { ws: { url: 'ws://localhost:8765', state: 'off', detail: '' }, serial: { state: 'off', detail: '' } },
@@ -45,7 +45,8 @@ class App {
     this.snapWarper = null;
     this.bus = new Bus();
     this.recorder = new SessionRecorder();
-    this.analysis = null; this.snapshot = null; this.snapshotBitmap = null; this.snapshotBlob = null;
+    this.analysis = null; this.seg = null; this.deleted = new Set(); this.sourceId = 0; this.snapKey = null; this._runId = 0; this.peopleSegs = [];
+    this.snapshot = null; this.snapshotBitmap = null; this.snapshotBlob = null;
     this.holds = []; this.suppress = []; this.ignoredLeds = []; this.nextId = 1;
     this.history = []; this.future = []; this._liveToken = 0;
     this.board = null; this.kilterSink = null; this.world = null;
@@ -112,13 +113,46 @@ class App {
     if (key !== this._Hkey) { this._H = wallHomography(c, RW, RH); this._Hkey = key; }
     return this._H;
   }
+  /** Identifies the picture + geometry an analysis/snapshot belongs to. */
+  _geoKey() {
+    const c = this.s.corners ? this.s.corners.map((p) => `${Math.round(p[0])},${Math.round(p[1])}`).join(';') : '';
+    const { RW, RH } = this.wallDims;
+    return `${this.sourceId}|${c}|${RW}x${RH}|${this.s.cam.rotation}${this.s.cam.mirror ? 'm' : ''}`;
+  }
+  /** The stored snapshot may only be shown/exported while it matches the current picture. */
+  get snapshotValid() { return !!this.snapshotBitmap && (this.snapKey === '*profile' ? !this.source.active : this.snapKey === this._geoKey()); }
+  /**
+   * Drops everything that was computed from a particular picture (analysis, candidates, snapshot, people mask, deletions).
+   * Holds themselves live in wall coordinates and stay.
+   */
+  _invalidateAnalysis() {
+    this._runId++;
+    clearTimeout(this._detectTimer); clearTimeout(this._commitTimer);
+    this.analysis = null; this.seg = null; this.deleted = new Set(); this.peopleSegs = [];
+    this.snapshot = null; this.snapshotBitmap = null; this.snapshotBlob = null; this.snapKey = null;
+    if (this.s.detect.hasAnalysis) this.set({ detect: { ...this.s.detect, hasAnalysis: false, busy: false } });
+  }
   imgToWall(x, y) { const H = this.Himg2wall; return H ? applyH(H, x, y) : [x, y]; }
   defaultCorners() { const w = this.source.width, h = this.source.height; return [[w * 0.2, h * 0.12], [w * 0.8, h * 0.12], [w * 0.8, h * 0.9], [w * 0.2, h * 0.9]]; }
-  setCorners(c, { save = true } = {}) { this.set({ corners: c }); if (save) this.saveSoon(); }
+  setCorners(c, { save = true } = {}) {
+    const old = this.s.corners, moved = !old || c.some((p, i) => Math.abs(p[0] - old[i][0]) + Math.abs(p[1] - old[i][1]) > 0.5);
+    this.set({ corners: c });
+    if (moved && this.analysis) this._invalidateAnalysis(); // the rectification changed: the old analysis no longer fits
+    if (save) this.saveSoon();
+  }
   setWall(patch) {
     const wall = { ...this.s.wall, ...patch };
     if (!(wall.wm >= 0.5 && wall.wm <= 20 && wall.hm >= 0.5 && wall.hm <= 20)) return;
-    this.set({ wall }); this.saveSoon();
+    const old = this.wallDims;
+    this.set({ wall });
+    const now = this.wallDims;
+    if (now.RW !== old.RW || now.RH !== old.RH) { // rescale holds and LED positions to the new pixel frame, drop the analysis
+      const sx = now.RW / old.RW, sy = now.RH / old.RH;
+      for (const h of this.holds) { h.poly = h.poly.map(([x, y]) => [x * sx, y * sy]); h.cx *= sx; h.cy *= sy; h.area *= sx * sy; h.diaCm = (2 * Math.sqrt(h.area / Math.PI)) / now.pxPerCm; }
+      this.set({ holds: this.holds, board: { ...this.s.board, leds: this.s.board.leds.map((l) => ({ ...l, x: l.x * sx, y: l.y * sy })) } });
+      this._invalidateAnalysis();
+    }
+    this.saveSoon();
   }
 
   // ---------- camera ----------
@@ -133,10 +167,24 @@ class App {
     catch (e) { this.set({ cam: { ...this.s.cam, status: 'error', error: e.message || String(e) } }); this.toast(`${label}: ${e.message || e}`, 'error'); }
   }
   async _afterSource() {
+    this.sourceId++;
+    this._invalidateAnalysis();
+    // a different PHOTO or VIDEO FILE is another picture of (maybe) another wall: ask what to do with the existing holds
+    if (['image', 'video'].includes(this.source.kind) && this.holds.some((h) => !h.ghost)) this.set({ detect: { ...this.s.detect, stale: true } });
+    else if (this.s.detect.stale) this.set({ detect: { ...this.s.detect, stale: false } });
     this.source.setOrientation({ rotation: this.s.cam.rotation, mirror: this.s.cam.mirror });
     for (let i = 0; i < 40 && !this.source.tick(performance.now()); i++) await sleep(50);
     this._camChanged();
-    if (!this.s.corners && this.source.width) this.setCorners(this.defaultCorners(), { save: false });
+    // corners belong to a camera view: keep them for the same resolution, scale them for the same aspect, else start over
+    const dims = [this.source.width, this.source.height], prev = this._srcDims;
+    if (dims[0]) {
+      if (!this.s.corners || ['image', 'video'].includes(this.source.kind)) this.setCorners(this.defaultCorners(), { save: false });
+      else if (prev && (prev[0] !== dims[0] || prev[1] !== dims[1])) {
+        const sameAspect = Math.abs(prev[0] / prev[1] - dims[0] / dims[1]) < 0.02;
+        this.setCorners(sameAspect ? this.s.corners.map(([x, y]) => [x * dims[0] / prev[0], y * dims[1] / prev[1]]) : this.defaultCorners(), { save: false });
+      }
+      this._srcDims = dims;
+    }
     this.refreshDevices();
   }
   useCamera(deviceId) {
@@ -158,6 +206,7 @@ class App {
       corners = orderCorners(corners);
     }
     this.set({ cam, corners }); this.source.setOrientation({ rotation: cam.rotation, mirror: cam.mirror });
+    this._invalidateAnalysis();
     this.saveSoon();
   }
   async lockCamera(on) {
@@ -228,46 +277,68 @@ class App {
 
   // ---------- holds: detection ----------
   get pxPerCm() { return this.wallDims.pxPerCm; }
+  /**
+   * Fresh detection run on the current picture. Deletions, the old analysis and (for a new photo) edited holds are
+   * discarded; edited holds survive only when re-detecting the SAME photo.
+   */
   async runDetect() {
-    const d = this.s.detect;
-    if (d.busy) return;
-    this.set({ detect: { ...d, busy: true, message: 'Capturing wall…' } });
+    if (this.s.detect.busy) return;
+    const replace = this.s.detect.stale;
+    this._invalidateAnalysis();
+    const run = this._runId;
+    const alive = () => run === this._runId;
+    this.set({ detect: { ...this.s.detect, busy: true, stale: false, hasAnalysis: false, message: 'Capturing wall…' } });
     try {
+      if (replace) { this.holds = []; this.ignoredLeds = []; }
+      for (const h of this.holds) delete h.cand; // candidate numbers belong to one analysis only
       if (this.board?.connected && this.board.lit.size) await this.board.allOff();
       const img = await this.captureWall(4);
+      if (!alive()) return;
       this.set({ detect: { ...this.s.detect, message: 'Detecting holds…' } });
       await sleep(30);
       await this._storeSnapshot(img);
       this.analysis = analyzeWall(img);
+      this.seg = segmentHolds(this.analysis, this.pxPerCm);
+      this.snapKey = this._geoKey();
       this.set({ detect: { ...this.s.detect, message: 'Checking for people in view…' } });
       const people = await this._findPeople();
-      this.set({ detect: { ...this.s.detect, hasAnalysis: true } });
+      if (!alive()) return;
+      this.history = []; this.future = [];
+      this.set({ detect: { ...this.s.detect, hasAnalysis: true, effMin: +this.seg.minDiaEff.toFixed(1) } });
       this._applyDetection(true);
       this.commit();
       const n = this.holds.filter((h) => !h.ghost).length;
-      this.set({ detect: { ...this.s.detect, busy: false, message: n ? `${n} holds found${people ? ` (ignored ${people} ${people > 1 ? 'people' : 'person'} in view)` : ''}` : 'No holds found. Raise the sensitivity or check the corners.' } });
+      this.set({ detect: { ...this.s.detect, busy: false, message: n ? `${n} holds found${people ? ` (ignored ${people} ${people > 1 ? 'people' : 'person'} in view)` : ''}` : 'No holds found. Check the corners and the wall size.' } });
     } catch (e) {
       this.set({ detect: { ...this.s.detect, busy: false, message: e.message } }); this.toast(e.message, 'error');
     }
   }
-  /** Re-run thresholding on the stored analysis (fast; used by the sliders). Manual holds are kept. */
-  _applyDetection(first = false) {
-    if (!this.analysis) return;
+  /** Overlap of a polygon with an existing hold, relative to the smaller one (0..1). */
+  _overlap(poly, area, h) { if (!h.poly) return 0; const inter = intersectionArea(h.poly, poly); return inter / Math.max(1, Math.min(area, h.area || Infinity)); }
+  /**
+   * Apply the slider values to the stored candidates (instant, never re-segments). Edited/added holds are kept;
+   * auto holds keep their id when they stay; holds the user deleted stay deleted until the next Detect.
+   */
+  _applyDetection(fromRun = false) {
+    if (!this.seg || (this.s.detect.busy && !fromRun)) return false; // sliders wait while a detection run is in progress
     const d = this.s.detect, px = this.pxPerCm;
-    const { holds: found, thresholds } = detectHolds(this.analysis, { sensitivity: d.sensitivity, minDiaCm: d.minDia, maxDiaCm: d.maxDia, pxPerCm: px });
-    this.set({ detect: { ...this.s.detect, effMin: +thresholds.minDiaEff.toFixed(1) } });
+    const cands = filterHolds(this.seg, { sensitivity: d.sensitivity, contrast: d.contrast, minDiaCm: d.minDia, maxDiaCm: d.maxDia });
     const keep = this.holds.filter((h) => h.source === 'manual');
+    const prevId = new Map(this.holds.filter((h) => h.source === 'auto' && h.cand != null).map((h) => [h.cand, h.id]));
+    const taken = new Set(keep.map((h) => h.cand).filter((v) => v != null));
     const out = keep.slice();
-    for (const f of found) {
-      if (keep.some((k) => pointInPolygon(k.poly, f.cx, f.cy) || pointInPolygon(f.poly, k.cx, k.cy))) continue;
-      if (this.suppress.some((s) => Math.hypot(s.x - f.cx, s.y - f.cy) < 1.5 * px)) continue;
-      if (this._inPeople(f.cx, f.cy, px)) continue; // a person was standing there while the wall was captured
-      out.push({ id: this.nextId++, ...f, source: 'auto' });
+    for (const c of cands) {
+      if (this.deleted.has(c.idx) || taken.has(c.idx)) continue;
+      if (keep.some((k) => this._overlap(c.poly, c.area, k) > 0.25)) continue; // already covered by an edited / added hold
+      if (this._inPeople(c.cx, c.cy, px)) continue;                            // a person stood there while the wall was captured
+      const { idx, ...rest } = c;
+      out.push({ ...rest, poly: c.poly.map((p) => [p[0], p[1]]), id: prevId.get(idx) ?? this.nextId++, cand: idx, source: 'auto' });
     }
-    resolveOverlaps(out.filter((h) => h.source === 'auto')); // touching holds: separate overlapping outlines
+    resolveOverlaps(out.filter((h) => h.source === 'auto')); // touching holds: cut along the line between them
     this.holds = out;
     this._rebind(); this._renumber();
-    if (!first) this.saveSoon();
+    this.saveSoon();
+    return true;
   }
   _inPeople(x, y, px) {
     const r = 11 * px;
@@ -305,10 +376,12 @@ class App {
       return best.length;
     } catch (e) { console.warn('people mask unavailable', e); return 0; }
   }
+  /** Slider moved: apply instantly to the stored candidates; one undo entry per gesture. */
   setDetectParam(patch) {
     this.set({ detect: { ...this.s.detect, ...patch } });
-    clearTimeout(this._detectTimer);
-    this._detectTimer = setTimeout(() => { if (this.analysis) { this._applyDetection(); this.commit(); } }, 220);
+    if (!this.seg) return;
+    clearTimeout(this._detectTimer); clearTimeout(this._commitTimer);
+    this._detectTimer = setTimeout(() => { if (this._applyDetection()) this._commitTimer = setTimeout(() => this.commit(), 450); }, 90);
   }
 
   // ---------- holds: editing ----------
@@ -320,9 +393,10 @@ class App {
   setUi(p) { this.set({ ui: { ...this.s.ui, ...p } }); }
   setNumberStart(n) { this.set({ numberStart: n ? 1 : 0 }); this._renumber(); this.saveSoon(); }
   setNumbering(mode) { this.set({ numbering: mode }); this._renumber(); this.saveSoon(); }
-  _snap() { return { holds: clone(this.holds), suppress: clone(this.suppress), ignoredLeds: [...this.ignoredLeds], nextId: this.nextId, leds: clone(this.s.board.leds) }; }
+  _snap() { const { sensitivity, contrast, minDia, maxDia } = this.s.detect; return { holds: clone(this.holds), ignoredLeds: [...this.ignoredLeds], nextId: this.nextId, leds: clone(this.s.board.leds), deleted: [...this.deleted], detect: { sensitivity, contrast, minDia, maxDia } }; }
   _restore(s) {
-    this.holds = clone(s.holds); this.suppress = clone(s.suppress); this.ignoredLeds = [...s.ignoredLeds]; this.nextId = s.nextId;
+    this.holds = clone(s.holds); this.ignoredLeds = [...s.ignoredLeds]; this.nextId = s.nextId; this.deleted = new Set(s.deleted || []);
+    if (s.detect) this.set({ detect: { ...this.s.detect, ...s.detect } });
     this.set({ board: { ...this.s.board, leds: clone(s.leds || []) } }); this.board?.setKnownPositions((s.leds || []).map((l) => l.pos));
     this._renumber();
   }
@@ -344,25 +418,30 @@ class App {
     }
     return best;
   }
+  /** True when a polygon covers a clear part (>20 %) of an existing real hold. */
+  _coversHold(poly, area) { return this.holds.some((h) => !h.ghost && this._overlap(poly, area, h) > 0.2); }
   addAt(x, y) {
     let f = this.analysis ? fitHoldAt(this.analysis, x, y, this.pxPerCm) : null;
     let note = '';
     if (!f) { const r = 2.5 * this.pxPerCm; f = { cx: x, cy: y, poly: ellipsePolygon(x, y, r, r, 8), area: Math.PI * r * r, solidity: 1, diaCm: 5 }; note = 'No clear hold edge found: placed a default shape. Drag its corners to fit.'; }
-    if (this.holds.some((h) => pointInPolygon(h.poly, f.cx, f.cy))) { this.toast('There is already a hold here.'); return null; }
+    if (this.holds.some((h) => !h.ghost && pointInPolygon(h.poly, f.cx, f.cy)) || this._coversHold(f.poly, f.area)) { this.toast('There is already a hold here.'); return null; }
     const h = { id: this.nextId++, ...f, source: 'manual' };
     this.holds.push(h); this._rebind(); this._renumber(); this.commit();
     this.set({ selected: h.id });
     if (note) this.toast(note);
     return h;
   }
+  /** Search an area more eagerly: take every stored candidate in it that is not covered yet. */
   addInRegion(r) {
-    if (!this.analysis) { this.toast('Run hold detection first.'); return 0; }
-    const d = this.s.detect, px = this.pxPerCm;
-    const { holds } = detectHolds(this.analysis, { sensitivity: Math.min(1, d.sensitivity + 0.35), minDiaCm: Math.max(1.5, (d.minDia || d.effMin || 3) * 0.7), maxDiaCm: d.maxDia, pxPerCm: px, region: r });
+    if (!this.seg) { this.toast('Run hold detection first.'); return 0; }
+    const d = this.s.detect;
+    const found = filterHolds(this.seg, { sensitivity: 1.4, contrast: 0, minDiaCm: Math.max(1.5, (d.minDia || this.seg.minDiaEff) * 0.7), maxDiaCm: d.maxDia, region: r });
     let n = 0;
-    for (const f of holds) {
-      if (this.holds.some((k) => pointInPolygon(k.poly, f.cx, f.cy) || pointInPolygon(f.poly, k.cx, k.cy))) continue;
-      this.holds.push({ id: this.nextId++, ...f, source: 'manual' }); n++;
+    for (const c of found) {
+      if (this._coversHold(c.poly, c.area)) continue;
+      const { idx, ...rest } = c;
+      this.deleted.delete(idx);
+      this.holds.push({ ...rest, poly: c.poly.map((p) => [p[0], p[1]]), id: this.nextId++, cand: idx, source: 'manual' }); n++;
     }
     if (n) { this._rebind(); this._renumber(); this.commit(); this.toast(`Added ${n} hold${n > 1 ? 's' : ''}.`); } else this.toast('Nothing new found in that area. Click a hold to add it directly.');
     return n;
@@ -372,7 +451,7 @@ class App {
     for (const h of this.holds) {
       if (!set.has(h.id)) continue;
       if (h.ghost && h.led != null) this.ignoredLeds.push(h.led);
-      else if (h.source === 'auto') this.suppress.push({ x: h.cx, y: h.cy });
+      else if (h.cand != null) this.deleted.add(h.cand); // stays deleted while the sliders move; a new Detect starts fresh
     }
     this.holds = this.holds.filter((h) => !set.has(h.id));
     this._rebind(); this._renumber(); this.commit();
@@ -390,8 +469,27 @@ class App {
     this.editHold(id, (h) => { const { cx, cy } = h; h.poly = h.poly.map(([x, y]) => [cx + (x - cx) * k, cy + (y - cy) * k]); });
     this.commit(); this._renumber();
   }
-  setHoldGhost(id, ghost) { const h = this.holds.find((x) => x.id === id); if (h) { h.ghost = ghost; this._renumber(); this.commit(); } }
-  clearHolds() { this.holds = []; this.suppress = []; this.ignoredLeds = []; this._renumber(); this.commit(); }
+  setHoldGhost(id, ghost) { const h = this.holds.find((x) => x.id === id); if (h) { h.ghost = ghost; if (!ghost) h.source = 'manual'; this._renumber(); this.commit(); } }
+  /** Remove every hold. Candidates stay deleted until the next Detect, so the sliders cannot bring them back. */
+  clearHolds() {
+    this.holds = []; this.ignoredLeds = [];
+    if (this.seg) this.deleted = new Set(this.seg.candidates.map((c) => c.idx));
+    this.set({ selected: null }); this._renumber(); this.commit();
+  }
+  /** Drop manual edits and deletions and show the automatic result of the current sliders again. */
+  resetToAuto() {
+    if (!this.seg) { this.toast('Run hold detection first.'); return; }
+    this.holds = this.holds.filter((h) => h.source !== 'manual'); this.deleted = new Set(); this.ignoredLeds = [];
+    this.set({ selected: null }); this._applyDetection(); this.commit();
+  }
+  // a new photo was loaded while holds exist (see _afterSource)
+  keepOldHolds() { this.set({ detect: { ...this.s.detect, stale: false, message: 'Kept the old holds. Detect again to refresh them from this photo.' } }); }
+  async detectReplacing() { this.set({ detect: { ...this.s.detect, stale: true } }); await this.runDetect(); }
+  async saveAsNewBoard() {
+    await this.saveNow();
+    await this.newProfile('New wall', true);
+    this.set({ detect: { ...this.s.detect, stale: false, message: '' } });
+  }
   endEdit() { this._rebind(); this._renumber(); this.commit(); }
 
   // ---------- board ----------
@@ -496,7 +594,8 @@ class App {
     const r = 2 * this.pxPerCm;
     for (const l of unmatched) {
       if (this.ignoredLeds.includes(l.pos)) continue;
-      this.holds.push({ id: 1e6 + l.pos, cx: l.x, cy: l.y, poly: ellipsePolygon(l.x, l.y, r, r, 8), area: Math.PI * r * r, solidity: 1, diaCm: 4, source: 'led', ghost: true, led: l.pos }); // stable id: selection survives re-binding
+      if (this.holds.some((h) => !h.ghost && h.led != null && polygonDistance(h.poly, l.x, l.y) <= this.pxPerCm)) continue; // a second LED of a big hold: no extra outline
+      this.holds.push({ id: 1e9 + l.pos, cx: l.x, cy: l.y, poly: ellipsePolygon(l.x, l.y, r, r, 8), area: Math.PI * r * r, solidity: 1, diaCm: 4, source: 'led', ghost: true, led: l.pos }); // stable id: selection survives re-binding
     }
   }
 
@@ -787,7 +886,7 @@ class App {
   // ---------- profiles ----------
   _profileData() {
     const s = this.s;
-    return { id: s.profileId, name: s.profileName, kilter: s.kilter, wall: s.wall, corners: s.corners, camRotation: s.cam.rotation, camMirror: s.cam.mirror, holds: this.holds, suppress: this.suppress, ignoredLeds: this.ignoredLeds, nextId: this.nextId, numbering: s.numbering, numberStart: s.numberStart, detect: { sensitivity: s.detect.sensitivity, minDia: s.detect.minDia, maxDia: s.detect.maxDia }, ledCount: s.board.ledCount, leds: s.board.leds, routes: s.routes.items, snapshot: this.snapshotBlob, holdCount: this.holds.filter((h) => !h.ghost).length };
+    return { id: s.profileId, name: s.profileName, kilter: s.kilter, wall: s.wall, corners: s.corners, camRotation: s.cam.rotation, camMirror: s.cam.mirror, holds: this.holds.map(({ cand, ...h }) => h), ignoredLeds: this.ignoredLeds, nextId: this.nextId, numbering: s.numbering, numberStart: s.numberStart, detect: { sensitivity: s.detect.sensitivity, contrast: s.detect.contrast, minDia: s.detect.minDia, maxDia: s.detect.maxDia }, ledCount: s.board.ledCount, leds: s.board.leds, routes: s.routes.items, snapshot: this.snapshotBlob, holdCount: this.holds.filter((h) => !h.ghost).length };
   }
   saveSoon() { this.set({ saved: false }); clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
   async saveNow() {
@@ -796,13 +895,13 @@ class App {
     catch (e) { console.warn('save failed', e); }
   }
   async _applyProfile(p) {
-    this.holds = clone(p.holds || []); this.suppress = p.suppress || []; this.ignoredLeds = p.ignoredLeds || []; this.nextId = p.nextId || this.holds.reduce((m, h) => Math.max(m, h.id), 0) + 1;
-    this.history = []; this.future = []; this.analysis = null; this.snapshot = null; this.snapshotBitmap = null; this.snapshotBlob = p.snapshot || null;
+    this.holds = clone(p.holds || []); this.holds.forEach((h) => delete h.cand); this.suppress = []; this.ignoredLeds = p.ignoredLeds || []; this.nextId = p.nextId || this.holds.reduce((m, h) => Math.max(m, h.id), 0) + 1;
+    this.history = []; this.future = []; this.analysis = null; this.seg = null; this.deleted = new Set(); this.peopleSegs = []; this._runId++; this.snapshot = null; this.snapshotBitmap = null; this.snapshotBlob = p.snapshot || null; this.snapKey = p.snapshot ? '*profile' : null;
     if (p.snapshot instanceof Blob) { const bmp = await createImageBitmap(p.snapshot); const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height; c.getContext('2d').drawImage(bmp, 0, 0); this.snapshotBitmap = c; }
     this.set({
       profileId: p.id, profileName: p.name, kilter: !!p.kilter, wall: p.wall || { wm: 3.6, hm: 3.6 }, corners: p.corners || this.s.corners, holds: this.holds, numbering: p.numbering || 'rows', numberStart: p.numberStart ?? 1, selected: null,
       cam: { ...this.s.cam, rotation: p.camRotation || 0, mirror: !!p.camMirror },
-      detect: { ...this.s.detect, ...(p.detect || {}), hasAnalysis: false, busy: false, message: '' },
+      detect: { ...this.s.detect, ...(p.detect || {}), hasAnalysis: false, busy: false, stale: false, message: '' },
       routes: { items: p.routes || [], active: p.routes?.[0]?.id ?? null, brush: 'hand', sync: true }, show: { ...this.s.show, running: false }, kilterTab: 'test',
       board: { ...this.s.board, ledCount: Math.max(1024, p.ledCount || 0), leds: p.leds || [], scan: { ...this.s.board.scan, result: null, verify: null } },
       step: this.source.active ? (p.corners ? 'align' : 'align') : 'camera', mode: 'setup', saved: true, demo: false,
@@ -914,7 +1013,7 @@ class App {
     const g = cv.getContext('2d');
     g.fillStyle = '#0b0e12'; g.fillRect(0, 0, RW, RH + bar);
     try {
-      if (this.snapshotBitmap) g.drawImage(this.snapshotBitmap, 0, 0, RW, RH);
+      if (this.snapshotValid) g.drawImage(this.snapshotBitmap, 0, 0, RW, RH);
       else if (this.source.active && this.Himg2wall) { const f = this._rectifyOnce(); g.putImageData(new ImageData(f.data, f.width, f.height), 0, 0); }
     } catch { /* export without background */ }
     g.lineJoin = 'round';

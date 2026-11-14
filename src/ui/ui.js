@@ -18,9 +18,9 @@ const STEPS = [
 // ---------- small building blocks ----------
 const Section = ({ title, hint, children, right }) => html`<section class="sec"><div class="sec-h"><h3>${title}</h3>${right}</div>${hint && html`<p class="hint">${hint}</p>`}${children}</section>`;
 const Btn = ({ children, kind = '', ...p }) => html`<button class=${`btn ${kind}`} ...${p}>${children}</button>`;
-const Slider = ({ label, value, min, max, step = 1, onInput, fmt = (v) => v, lo, hi }) => html`
-  <label class="slider"><div class="sl-top"><span>${label}</span><b>${fmt(value)}</b></div>
-  <input type="range" min=${min} max=${max} step=${step} value=${value} onInput=${(e) => onInput(+e.target.value)} />
+const Slider = ({ label, value, min, max, step = 1, onInput, fmt = (v) => v, lo, hi, disabled }) => html`
+  <label class=${`slider ${disabled ? 'off' : ''}`}><div class="sl-top"><span>${label}</span><b>${fmt(value)}</b></div>
+  <input type="range" min=${min} max=${max} step=${step} value=${value} disabled=${disabled} onInput=${(e) => onInput(+e.target.value)} />
   ${(lo || hi) && html`<div class="sl-ends"><span>${lo}</span><span>${hi}</span></div>`}</label>`;
 const Seg = ({ options, value, onChange }) => html`<div class="seg">${options.map((o) => html`<button class=${value === o.id ? 'on' : ''} onClick=${() => onChange(o.id)} title=${o.title || ''}>${o.label}</button>`)}</div>`;
 /** Text/number field that keeps what you type; the value is applied on Enter or when the field loses focus. */
@@ -152,27 +152,35 @@ function AlignStep() {
   </div>`;
 }
 
+function StaleBanner() {
+  const st = S((s) => s), n = st.holds.filter((h) => !h.ghost).length;
+  return html`<div class="note warn stale"><b>New photo.</b> The ${n} holds belong to the previous photo.
+    <div class="col-btns"><${Btn} kind="primary" onClick=${() => { app.goStep('holds'); app.detectReplacing(); }}>Detect holds in this photo<//><${Btn} onClick=${() => app.saveAsNewBoard()}>Keep the old board, start a new one<//><${Btn} onClick=${() => app.keepOldHolds()}>Keep the old holds (same wall)<//></div></div>`;
+}
+
 function HoldsStep() {
   const st = S((s) => s);
-  const d = st.detect, n = st.holds.filter((h) => !h.ghost).length;
+  const d = st.detect, n = st.holds.filter((h) => !h.ghost).length, can = d.hasAnalysis && !d.busy;
   const tools = [{ id: 'select', label: 'Select', title: 'V: select, move, reshape' }, { id: 'add', label: 'Add', title: 'A: click a hold, or drag an area to search it' }, { id: 'remove', label: 'Remove', title: 'X: click a hold, or drag over false detections' }];
-  const hints = { select: 'Click a hold to select it. Drag it to move; drag a white corner to reshape. Delete removes it.', add: 'Click on a hold to add it (the edge is found automatically). Drag a rectangle to search that area more sensitively.', remove: 'Click a false detection to remove it, or drag a rectangle over several.' };
+  const hints = { select: 'Click a hold to select it. Drag it to move; drag a white corner to reshape. Delete removes it.', add: 'Click on a hold to add it (the edge is found automatically). Drag a rectangle to search that area more eagerly.', remove: 'Click a false detection to remove it, or drag a rectangle over several.' };
   return html`<div class="step-body">
-    <${Btn} kind="primary wide" disabled=${d.busy} onClick=${() => app.runDetect()}>${d.busy ? 'Working…' : n ? 'Detect again' : 'Detect holds'}<//>
+    <${Btn} kind="primary wide" disabled=${d.busy} onClick=${() => app.runDetect()}>${d.busy ? 'Working…' : n && d.hasAnalysis ? 'Detect again' : 'Detect holds'}<//>
     ${d.message && html`<p class="hint center">${d.message}</p>`}
-    <${Section} title="Detection filters">
-      <${Slider} label="Sensitivity" value=${d.sensitivity} min=${0} max=${1} step=${0.01} fmt=${(v) => `${Math.round(v * 100)}%`} lo="fewer holds" hi="more holds" onInput=${(v) => app.setDetectParam({ sensitivity: v })} />
-      <${Slider} label="Ignore smaller than" value=${d.minDia} min=${0} max=${10} step=${0.5} fmt=${(v) => (v === 0 ? `Auto (${d.effMin || '–'} cm)` : `${v} cm`)} lo="auto: relative to typical hold" onInput=${(v) => app.setDetectParam({ minDia: v })} />
-      <${Slider} label="Ignore larger than" value=${d.maxDia} min=${10} max=${60} step=${1} fmt=${(v) => `${v} cm`} onInput=${(v) => app.setDetectParam({ maxDia: v })} />
+    <${Section} title="Detection filters" hint=${can ? '' : 'Press "Detect holds" on the current photo to use the sliders.'}>
+      <${Slider} disabled=${!can} label="Sensitivity" value=${d.sensitivity} min=${0} max=${1} step=${0.01} fmt=${(v) => `${Math.round(v * 100)}%`} lo="fewer holds" hi="more holds" onInput=${(v) => app.setDetectParam({ sensitivity: v })} />
+      <${Slider} disabled=${!can} label="Edge contrast" value=${d.contrast} min=${0} max=${1} step=${0.01} fmt=${(v) => (v === 0 ? 'off' : `${Math.round(v * 100)}%`)} lo="off" hi="only sharply outlined" onInput=${(v) => app.setDetectParam({ contrast: v })} />
+      <${Slider} disabled=${!can} label="Ignore smaller than" value=${d.minDia} min=${0} max=${10} step=${0.5} fmt=${(v) => (v === 0 ? `Auto (${d.effMin || '–'} cm)` : `${v} cm`)} lo="auto: relative to typical hold" onInput=${(v) => app.setDetectParam({ minDia: v })} />
+      <${Slider} disabled=${!can} label="Ignore larger than" value=${d.maxDia} min=${10} max=${60} step=${1} fmt=${(v) => `${v} cm`} onInput=${(v) => app.setDetectParam({ maxDia: v })} />
     <//>
     <${Section} title="Clean up" right=${html`<span class="undo"><button disabled=${!st.canUndo} onClick=${() => app.undo()} title="Ctrl+Z">↶</button><button disabled=${!st.canRedo} onClick=${() => app.redo()} title="Ctrl+Y">↷</button></span>`}>
       <${Seg} value=${st.tool} onChange=${(t) => app.setTool(t)} options=${tools} />
       <p class="hint">${hints[st.tool]}</p>
+      <div class="row"><${Btn} disabled=${!n} onClick=${() => confirm(`Remove all ${n} holds?`) && app.clearHolds()}>Clear all<//><${Btn} disabled=${!can} title="Drop manual edits and deletions" onClick=${() => app.resetToAuto()}>Reset to auto<//></div>
     <//>
     <${Section} title="Numbering">
       <label class="field"><select value=${st.numbering} onChange=${(e) => app.setNumbering(e.target.value)}>${NUMBERING_MODES.filter((m) => m.id !== 'led' || st.kilter).map((m) => html`<option value=${m.id}>${m.label}</option>`)}</select></label>
       <div class="row2"><span class="hint" style="align-self:center">Start counting at</span><${Seg} value=${String(st.numberStart)} onChange=${(v) => app.setNumberStart(+v)} options=${[{ id: '0', label: '0' }, { id: '1', label: '1' }]} /></div>
-      <p class="hint">Numbers always run without gaps up to ${st.holds.filter((h) => !h.ghost).length ? st.holds.filter((h) => !h.ghost).length - 1 + st.numberStart : '–'}.</p>
+      <p class="hint">Numbers always run without gaps up to ${n ? n - 1 + st.numberStart : '–'}.</p>
       <label class="check"><input type="checkbox" checked=${st.ui.labels} onChange=${(e) => app.setUi({ labels: e.target.checked })} /><span>Show numbers</span></label>
     <//>
     <${NextBtn} to=${st.kilter ? 'board' : 'ready'} disabled=${!n} />
@@ -373,7 +381,7 @@ export function Root() {
   return html`<div class="app">
     <${Header} />
     <div class="main">
-      <aside class="panel left">${st.mode === 'live' ? html`<${LivePanel} />` : html`<${Stepper} /><${Step} />`}<${Diagnostics} /></aside>
+      <aside class="panel left">${st.mode === 'live' ? html`<${LivePanel} />` : html`${st.detect.stale && html`<div class="stale-wrap"><${StaleBanner} /></div>`}<${Stepper} /><${Step} />`}<${Diagnostics} /></aside>
       <${StageView} />
       <aside class="panel right">${st.mode === 'live' ? html`<${LiveRight} />` : html`<${Inspector} />`}</aside>
     </div>
