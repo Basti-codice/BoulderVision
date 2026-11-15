@@ -34,3 +34,16 @@ real climber while this was written. Go through this list once and note anything
   swapped, use *Swap left / right* or change *Climber faces*.
 * If contacts flicker, raise *Contact tolerance* a little. If hands seem to touch holds they only pass, lower it.
 * If the frame rate is low (< 15 fps), choose *Lite* or *Full* instead of *Heavy*.
+
+## When something is off
+
+Press **Save debug report** (bottom of the left panel) right after the problem and keep the file. It contains the frame
+rate, Bluetooth timing, detection and LED statistics, the hold/LED map and the last events and errors. Tick *include a
+camera image* if the problem is about what the camera sees.
+
+## Games (smoke test of the whole chain)
+
+Live -> *Game* -> **Coins**: two lit holds appear on screen and on the board; grab one with a hand: it flashes green and a
+new one appears. **Dodge**: a red bar falls; it must never light more than about half of the wall width. If hands/feet do not
+score, adjust *Feet/Hands: shift up* in the Live panel first.
+
