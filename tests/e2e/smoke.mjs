@@ -100,7 +100,7 @@ check('slider gestures do not flood the undo history', sl.historyAdded <= 4, `+$
 
 // --- new photo: old detection must not be shown or reused
 await page.click('.step:has-text("Camera")');
-await page.click('.seg button:has-text("File")');
+await page.click('.seg button:has-text("Photo")');
 await page.setInputFiles('input[type=file][accept="video/*,image/*"]', new globalThis.URL('../fixtures/dense-wall.jpg', import.meta.url).pathname);
 await page.waitForFunction(() => window.__bv.s.cam.kind === 'image', null, { timeout: 15000 });
 const np = await page.evaluate(() => { const a = window.__bv; return { stale: a.s.detect.stale, analysis: !!a.analysis, hasAnalysis: a.s.detect.hasAnalysis, snapValid: a.snapshotValid, w: a.source.width, corners: a.s.corners.map((c) => c.map(Math.round)) }; });
@@ -235,11 +235,40 @@ console.log(`   live: ${agree}/${total} limb samples on the right hold, ${wrong}
 check('live: contacts found', total >= 20);
 check('live: >= 90% correct hold when in contact', agree / Math.max(1, total) >= 0.9);
 check('live: board LEDs follow contacts', samples.some((s) => s.lit.length >= 3));
+// --- games (use the live contacts, light holds on screen and board)
+const games = await page.evaluate(async () => {
+  const a = window.__bv, wait = (ms) => new Promise((r) => setTimeout(r, ms)), out = {};
+  a.setLive({ lightBoard: false }); await wait(500); // hand/foot lighting resumes after a game, so switch it off to see only the game
+  a.startGame('coins'); await wait(3800);
+  out.coins = { phase: a.game.state(performance.now()).phase, coins: a.game.coins.length, screen: a.showLit?.size ?? 0, board: a.world.lit.size, hud: a.s.game.active };
+  await a.stopGame(); await wait(700);
+  out.afterStop = a.world.lit.size;
+  a.startGame('dodge'); await wait(5200);
+  out.dodge = { phase: a.game.state(performance.now()).phase, bars: a.game.bars.length, screen: a.showLit?.size ?? 0, board: a.world.lit.size };
+  await a.stopGame(); await wait(700);
+  out.afterStop2 = a.world.lit.size;
+  return out;
+});
+console.log('   games', JSON.stringify(games));
+check('coins game: running, coins lit on screen and board', games.coins.phase === 'running' && games.coins.coins === 2 && games.coins.screen === 2 && games.coins.board >= 1 && games.coins.board <= 2 && games.coins.hud);
+check('dodge game: bars lit on screen and board', games.dodge.phase === 'running' && games.dodge.bars >= 1 && games.dodge.screen >= 1 && games.dodge.board >= 1);
+check('stopping a game switches the board off', games.afterStop === 0 && games.afterStop2 === 0);
+await shot('06b-game');
+
 const sum = await page.evaluate(async () => { const a = window.__bv; await a.stopLive(); return { events: a.recorder.events.length, lit: [...a.world.lit.keys()].length, summary: a.s.session.summary }; });
 console.log('   session', JSON.stringify(sum));
 check('events recorded', sum.events >= 10);
 check('board dark after stop', sum.lit === 0);
 await shot('07-review');
+
+// --- debug report (button in the footer)
+const [dlDbg] = await Promise.all([page.waitForEvent('download'), page.click('button:has-text("Save debug report")')]);
+const dbg = JSON.parse(fs.readFileSync(await dlDbg.path(), 'utf8'));
+check('debug report has environment, detection, board and log', dbg.format === 'bouldervision-debug' && dbg.environment.userAgent && dbg.detection.holds.total > 100 && dbg.board.ledsMapped > 100 && dbg.log.length > 5 && Array.isArray(dbg.holds), `${dbg.holds.length} holds, ${dbg.log.length} log entries`);
+check('debug report has no camera image by default', dbg.image === undefined);
+const withImg = await page.evaluate(() => window.__bv.buildDebugReport({ includeImage: true }));
+check('debug report can include a camera image', typeof withImg.image === 'string' && withImg.image.startsWith('data:image/jpeg'), `${withImg.image?.length} chars`);
+check('log captured detection and scan events', dbg.log.some((e) => e.kind === 'detect') && dbg.log.some((e) => e.kind === 'scan'));
 
 console.log('\nconsole warnings/errors:', logs.length ? '\n' + logs.slice(0, 10).join('\n') : 'none');
 await browser.close();

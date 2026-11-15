@@ -1,4 +1,4 @@
-// Frame sources: webcam / phone-as-webcam (getUserMedia), WebRTC stream, video/image file, demo world.
+// Frame sources: webcam (getUserMedia; phones work through a webcam app), video/image file, demo world.
 // Everything downstream reads `source.canvas` (already rotated/mirrored), so orientation is handled in one place.
 
 export class FrameSource extends EventTarget {

@@ -6,8 +6,8 @@ import { Stage, LIMB_COL } from './stage.js';
 import { NUMBERING_MODES } from '../core/numbering.js';
 import { BleTransport } from '../board/aurora.js';
 import { SerialSink } from '../outputs/sinks.js';
-import { qrSvg } from '../core/phone.js';
 import { SHOWS, ROLES } from '../outputs/lightshow.js';
+import { GAMES } from '../game/games.js';
 
 const S = (sel) => useStore(store, sel);
 const STEPS = [
@@ -91,36 +91,25 @@ function NextBtn({ to, label = 'Continue', disabled }) { return html`<${Btn} kin
 
 function CameraStep() {
   const st = S((s) => s);
-  const cam = st.cam, ph = st.phone;
-  const [tab, setTab] = useState(cam.kind === 'phone' ? 'phone' : 'cam');
+  const cam = st.cam;
+  const [tab, setTab] = useState('cam');
   const fileRef = useRef();
   const insecure = !window.isSecureContext;
   return html`<div class="step-body">
     ${insecure && html`<div class="note warn">Camera and Bluetooth need HTTPS or localhost. This page is served insecurely.</div>`}
-    <${Seg} value=${tab} onChange=${setTab} options=${[{ id: 'cam', label: 'Webcam / Phone app' }, { id: 'phone', label: 'Phone (beta)' }, { id: 'file', label: 'File' }, { id: 'demo', label: 'Demo' }]} />
+    <${Seg} value=${tab} onChange=${setTab} options=${[{ id: 'cam', label: 'Camera' }, { id: 'file', label: 'Photo / video' }, { id: 'demo', label: 'Demo' }]} />
     ${tab === 'cam' && html`<div>
-      <p class="hint"><b>Recommended for phones:</b> install a free webcam app on the phone and PC (Iriun Webcam, DroidCam, Camo, or Windows 11 Phone Link). The phone then shows up here as a normal camera. Also works: USB webcams, Continuity Camera, OBS Virtual Camera.</p>
+      <p class="hint">Any device that shows up as a camera works: USB webcams, a phone with a webcam app (Iriun Webcam, DroidCam, Camo, Windows 11 Phone Link), Continuity Camera, OBS Virtual Camera.</p>
       <label class="field"><span>Camera</span><select value=${cam.deviceId} onChange=${(e) => app.useCamera(e.target.value)}><option value="">Default camera</option>${cam.devices.map((d) => html`<option value=${d.id}>${d.label}</option>`)}</select></label>
       <label class="field"><span>Resolution</span><select value=${cam.res} onChange=${(e) => app.setRes(+e.target.value)}><option value="720">720p (fast)</option><option value="1080">1080p (recommended)</option><option value="2160">4K (if supported)</option></select></label>
       <${Btn} kind="primary wide" onClick=${() => app.useCamera()}>${cam.kind === 'camera' ? 'Restart camera' : 'Start camera'}<//>
-    </div>`}
-    ${tab === 'phone' && html`<div>
-      <p class="hint"><b>Beta.</b> No app needed, but it needs HTTPS (<i>npm run dev:phone</i>), the same Wi-Fi and internet for pairing. If it does not work, use a webcam app from the first tab instead.</p>
-      <label class="field"><span>App address the phone should open</span>
-        ${ph.lan?.ips?.length > 1 ? html`<select value=${ph.baseUrl} onChange=${(e) => app.setPhoneBase(e.target.value)}>${ph.lan.ips.map((ip) => html`<option value=${`${ph.lan.protocol}://${ip}:${ph.lan.port}/`}>${ip}</option>`)}<option value=${ph.baseUrl}>${ph.baseUrl}</option></select>` : html`<${EditField} value=${ph.baseUrl} onCommit=${(v) => app.setPhoneBase(v)} />`}</label>
-      ${/localhost|127\.0\.0\.1/.test(ph.baseUrl) && html`<div class="note warn">A phone cannot open "localhost". Start the app with <b>npm run dev:phone</b> (the address is filled in automatically) or enter the address of a hosted copy.</div>`}
-      ${!/localhost|127\.0\.0\.1/.test(ph.baseUrl) && ph.baseUrl.startsWith('http:') && html`<div class="note warn">Phones only allow the camera on <b>https</b>. Stop the server and run <b>npm run dev:phone</b>. The phone will show a certificate warning once: choose "Advanced" and continue.</div>`}
-      ${ph.lan && html`<p class="hint">Phone and laptop must be on the same Wi-Fi. If the page does not load, allow Node.js on private networks in the Windows firewall prompt.</p>`}
-      ${ph.state === 'off' || ph.state === 'error' ? html`<${Btn} kind="primary wide" disabled=${!ph.baseUrl.startsWith('https:')} title=${ph.baseUrl.startsWith('https:') ? '' : 'The phone needs an https address'} onClick=${() => app.startPhone()}>Create pairing code<//>` : html`<div class="qr" dangerouslySetInnerHTML=${{ __html: ph.url ? qrSvg(ph.url) : '' }}></div>`}
-      <div class="note">${{ off: '', starting: 'Contacting the pairing server…', 'waiting-broker': 'Contacting the pairing server…', 'waiting-phone': 'Waiting for the phone…', streaming: 'Phone connected.', closed: 'Phone disconnected.', 'broker-lost': 'Pairing server connection lost.', error: `Pairing failed: ${ph.detail}` }[ph.state]}</div>
-      ${ph.url && html`<input class="mono small" readonly value=${ph.url} onFocus=${(e) => e.target.select()} />`}
     </div>`}
     ${tab === 'file' && html`<div><p class="hint">Use a video or photo of the wall instead of a live camera. Great for trying the app away from the gym.</p><${Btn} kind="primary wide" onClick=${() => fileRef.current.click()}>Choose video or photo…<//><input ref=${fileRef} type="file" accept="video/*,image/*" hidden onChange=${(e) => e.target.files[0] && app.useFile(e.target.files[0])} /></div>`}
     ${tab === 'demo' && html`<div><p class="hint">A simulated wall with a virtual LED board and a virtual climber. Walks through the complete workflow without any hardware.</p><${Btn} kind="primary wide" onClick=${() => app.startDemo()}>Start demo wall<//></div>`}
     ${cam.error && html`<div class="note bad">${cam.error}</div>`}
     ${cam.status === 'on' && html`<${Section} title="Image">
       <div class="row"><${Btn} onClick=${() => app.setOrientation({ rotation: (cam.rotation + 90) % 360 })}>Rotate 90° ↻<//><${Btn} kind=${cam.mirror ? 'active' : ''} onClick=${() => app.setOrientation({ mirror: !cam.mirror })}>Mirror<//></div>
-      ${(cam.kind === 'camera' || cam.kind === 'phone') && html`<label class="check"><input type="checkbox" checked=${cam.locked} onChange=${(e) => app.lockCamera(e.target.checked)} /><span>Lock exposure / white balance / focus</span></label>`}
+      ${cam.kind === 'camera' && html`<label class="check"><input type="checkbox" checked=${cam.locked} onChange=${(e) => app.lockCamera(e.target.checked)} /><span>Lock exposure / white balance / focus</span></label>`}
       ${cam.lockMsg && html`<p class="hint">${cam.lockMsg}</p>`}
       <p class="hint">Put the tripod in front of the wall so the whole board is in view. Straight-on is best, but slightly off-centre is fine: the next step straightens it.</p>
     <//>`}
@@ -292,6 +281,12 @@ function LivePanel() {
       <label class="field"><span>Climber faces</span><select value=${l.facing} onChange=${(e) => app.setLive({ facing: e.target.value })}><option value="wall">The wall (camera behind)</option><option value="camera">The camera</option></select></label>
       <label class="check"><input type="checkbox" checked=${l.swapLR} onChange=${(e) => app.setLive({ swapLR: e.target.checked })} /><span>Swap left / right</span></label>
     <//>
+    <${Section} title="Game" hint="Little games for testing: they use the same hand and foot contacts. Holds light up on screen and, if connected, on the board.">
+      <label class="field"><span>Choose a game</span><select value=${st.game.id} disabled=${st.game.active} onChange=${(e) => app.selectGame(e.target.value)}>${GAMES.map((g) => html`<option value=${g.id}>${g.title}</option>`)}</select></label>
+      <p class="hint">${GAMES.find((g) => g.id === st.game.id).blurb}</p>
+      ${st.game.active ? html`<${Btn} kind="danger wide" onClick=${() => app.stopGame()}>Stop game<//>` : html`<${Btn} kind="primary wide" disabled=${!l.running} onClick=${() => app.startGame()}>Start game<//>`}
+      <p class="hint">Best: ${GAMES.map((g) => `${g.title} ${st.game.best[g.id] || 0}`).join(' · ')}</p>
+    <//>
     ${st.kilter && html`<${Section} title="Board output">
       <label class="check"><input type="checkbox" checked=${l.lightBoard} disabled=${!connected} onChange=${(e) => app.setLive({ lightBoard: e.target.checked })} /><span>Light the holds hands and feet are on</span></label>
       ${!connected && html`<p class="hint">Connect the board in the Setup → Board step first.</p>`}
@@ -356,7 +351,19 @@ function StageView() {
     ${st.mode === 'setup' && hints[st.step] && !none && html`<div class="hintbar">${hints[st.step]}</div>`}
     <div class="vtools"><button title="Fit to view" onClick=${() => stageRef.current?.fit()}>⤢</button>${st.step !== 'align' && html`<button class=${st.ui.labels ? 'on' : ''} title="Hold numbers" onClick=${() => app.setUi({ labels: !st.ui.labels })}>#</button>`}</div>
     ${live && html`<div class="live-pill"><i></i>LIVE</div>`}
+    <${GameHud} />
   </main>`;
+}
+
+function GameHud() {
+  const g = S((s) => s.game);
+  if (!g.active || !g.state) return null;
+  const st = g.state, best = g.best[g.id] || 0, over = st.phase === 'over', mmss = (sec) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+  let line;
+  if (st.phase === 'ready') line = html`<b>Get ready</b><span class="big">${st.countdown}</span>`;
+  else if (g.id === 'coins') line = over ? html`<b>Time is up</b><span class="big">${st.score}</span><span>coins score · best ${best}</span>` : html`<b>Coins</b><span class="big">${st.score}</span><span>${st.combo > 1 ? `combo ×${st.combo}` : ''}</span><span>${mmss(st.secondsLeft)}</span>`;
+  else line = over ? html`<b>Game over</b><span class="big">${st.score} s</span><span>survived · best ${best} s</span>` : html`<b>Dodge</b><span class="big">${st.score} s</span><span class="hearts">${'♥'.repeat(st.lives)}${'♡'.repeat(Math.max(0, 3 - st.lives))}</span>`;
+  return html`<div class=${`game-hud ${over ? 'over' : ''}`}>${line}${over && html`<span class="hud-btns"><button class="btn primary" onClick=${() => app.startGame()}>Play again</button><button class="btn" onClick=${() => app.stopGame()}>Close</button></span>`}</div>`;
 }
 
 function Toast() {
@@ -369,9 +376,13 @@ const hasWebGL = () => (_webgl ??= !!document.createElement('canvas').getContext
 
 function Diagnostics() {
   const st = S((s) => s);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(false), [withImage, setWithImage] = useState(false);
   const info = { secureContext: window.isSecureContext, webgl: hasWebGL(), webBluetooth: BleTransport.supported(), webSerial: SerialSink.supported(), camera: st.cam.label, frame: `${st.cam.width}x${st.cam.height}@${st.cam.fps}`, pose: `${st.live.activeVariant || '-'} / ${st.live.delegate || '-'}`, poseFps: st.live.fps, poseLatencyMs: st.live.latency, board: st.board.state, ledUpdateMs: app.board?.lastMs ?? '-', bleWrite: app.board?.t?.fast === false ? 'with response' : 'without response (fast)', holds: st.holds.length, leds: st.board.leds.length, userAgent: navigator.userAgent };
-  return html`<div class="diag"><button class="linkbtn" onClick=${() => setOpen(!open)}>Diagnostics</button>${open && html`<pre>${Object.entries(info).map(([k, v]) => `${k}: ${v}`).join('\n')}</pre><button class="linkbtn" onClick=${() => navigator.clipboard?.writeText(JSON.stringify(info, null, 1))}>Copy report</button>`}</div>`;
+  return html`<div class="diag">
+    <div class="diag-row"><button class="linkbtn" onClick=${() => setOpen(!open)}>Diagnostics</button><button class="btn small-btn" onClick=${() => app.exportDebug({ includeImage: withImage })}>Save debug report</button></div>
+    <label class="check small"><input type="checkbox" checked=${withImage} onChange=${(e) => setWithImage(e.target.checked)} /><span>include a camera image</span></label>
+    ${open && html`<pre>${Object.entries(info).map(([k, v]) => `${k}: ${v}`).join('\n')}</pre>`}
+  </div>`;
 }
 
 export function Root() {

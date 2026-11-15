@@ -14,7 +14,10 @@ import { AuroraBoard, BleTransport } from '../board/aurora.js';
 import { PoseEngine, SKELETON, pickClimber, limbPoints, limbQuality, SideGuard, VARIANTS } from '../pose/pose.js';
 import { Bus, WebSocketSink, SerialSink, KilterSink, SessionRecorder, download, downloadBlob } from '../outputs/sinks.js';
 import { showFrame, ROLES } from '../outputs/lightshow.js';
-import { PhoneReceiver } from '../core/phone.js';
+import { debugLog } from '../core/debuglog.js';
+import { createGame } from '../game/games.js';
+import { rng } from '../core/rng.js';
+import pkg from '../../package.json';
 import { DemoWorld, DemoPose } from '../sim/demo.js';
 import * as profiles from '../store/profiles.js';
 
@@ -22,6 +25,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clone = (o) => structuredClone(o);
 const SETTINGS_KEY = 'bv.settings';
 const MAX_SHOW_LEDS = 36;
+const BEST_KEY = 'bv.game.best';
+const GAME_UI_INTERVAL_MS = 200;   // HUD refresh rate
+const GAME_LED_INTERVAL_MS = 120;  // minimum time between LED frames (Bluetooth is slow)
 
 export const store = createStore({
   ready: false, profiles: [], profileId: null, profileName: 'My wall', saved: true,
@@ -34,8 +40,8 @@ export const store = createStore({
   live: { footUp: 0, handUp: 0, parallax: 0, running: false, loading: false, variant: 'auto', activeVariant: '', delegate: '', fps: 0, latency: 0, person: false, contacts: { LH: null, RH: null, LF: null, RF: null }, tolCm: 2.5, facing: 'wall', swapLR: false, lightBoard: false, error: '' },
   outputs: { ws: { url: 'ws://localhost:8765', state: 'off', detail: '' }, serial: { state: 'off', detail: '' } },
   session: { recording: false, events: 0, duration: 0, replayT: null, playing: false, summary: null },
-  phone: { state: 'off', url: '', baseUrl: '', detail: '', lan: null },
   toast: null, ui: { labels: true, grid: true },
+  game: { id: 'coins', active: false, state: null, best: { coins: 0, dodge: 0 } },
   kilterTab: 'test', show: { running: false, pattern: 'rainbow', speed: 1 }, routes: { items: [], active: null, brush: 'hand', sync: true },
 });
 
@@ -56,13 +62,16 @@ class App {
     this.ws = new WebSocketSink((state, detail = '') => this.set({ outputs: { ...this.s.outputs, ws: { ...this.s.outputs.ws, state, detail } } }));
     this.serial = new SerialSink((state, detail = '') => this.set({ outputs: { ...this.s.outputs, serial: { state, detail } } }));
     this.bus.on((m) => { this.recorder.handle(m); this.ws.handle(m); this.serial.handle(m); this.kilterSink?.handle(m); });
-    this.showLit = null;
+    this.showLit = null; this.game = null; this._ledSig = null; this._ledNext = null; this._ledBusy = false; this._gameUi = 0; this._gameLed = 0;
     this.source.addEventListener('change', () => this._camChanged());
     this._lastUi = 0;
   }
   get s() { return store.get(); }
   set(p) { store.set(p); }
-  toast(msg, kind = 'info') { const id = Math.random(); this.set({ toast: { msg, kind, id } }); setTimeout(() => { if (this.s.toast?.id === id) this.set({ toast: null }); }, kind === 'error' ? 7000 : 3500); }
+  /** Record an event for the debug report. */
+  log(kind, data) { debugLog.info(kind, data); }
+  toast(msg, kind = 'info') {
+    if (kind === 'error') debugLog.error('toast', msg); const id = Math.random(); this.set({ toast: { msg, kind, id } }); setTimeout(() => { if (this.s.toast?.id === id) this.set({ toast: null }); }, kind === 'error' ? 7000 : 3500); }
 
   // ---------- lifecycle ----------
   async init() {
@@ -71,9 +80,8 @@ class App {
       cam: { ...this.s.cam, res: st.res || 1080, deviceId: st.deviceId || '' },
       live: { ...this.s.live, tolCm: st.tolCm ?? 2.5, facing: st.facing || 'wall', variant: st.variant || 'auto', footUp: st.footUp ?? 0, handUp: st.handUp ?? 0, parallax: st.parallax ?? 0 },
       outputs: { ...this.s.outputs, ws: { ...this.s.outputs.ws, url: st.wsUrl || this.s.outputs.ws.url } },
-      phone: { ...this.s.phone, baseUrl: st.phoneBase || location.href.replace(/#.*$/, '') },
     });
-    await this._detectLan(st.phoneBase);
+    try { this.set({ game: { ...this.s.game, best: { ...this.s.game.best, ...JSON.parse(localStorage.getItem(BEST_KEY) || '{}') } } }); } catch { /* ignore corrupt storage */ }
     try { this.set({ profiles: await profiles.listProfiles() }); } catch (e) { console.warn('profiles unavailable', e); }
     const last = localStorage.getItem('bv.lastProfile');
     if (last && this.s.profiles.some((p) => p.id === last)) await this.loadProfile(last); else await this.newProfile('My wall', false);
@@ -82,25 +90,16 @@ class App {
     const loop = (now) => { this.frame(now); requestAnimationFrame(loop); };
     requestAnimationFrame(loop);
   }
-  /** Asks the dev server for the Wi-Fi address a phone can use (the QR code must not point to "localhost"). */
-  async _detectLan(saved) {
-    try {
-      const r = await fetch('./__lan', { cache: 'no-store' });
-      if (!r.ok || !(r.headers.get('content-type') || '').includes('json')) return;
-      const lan = await r.json();
-      this.set({ phone: { ...this.s.phone, lan } });
-      if (lan.ips?.length && (!saved || /localhost|127\.0\.0\.1/.test(saved))) this.setPhoneBase(`${lan.protocol}://${lan.ips[0]}:${lan.port}/`);
-    } catch { /* hosted build: no dev server endpoint */ }
-  }
   saveSettings() {
-    const { cam, live, outputs, phone } = this.s;
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ res: cam.res, deviceId: cam.deviceId, tolCm: live.tolCm, facing: live.facing, variant: live.variant, footUp: live.footUp, handUp: live.handUp, parallax: live.parallax, wsUrl: outputs.ws.url, phoneBase: phone.baseUrl }));
+    const { cam, live, outputs } = this.s;
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ res: cam.res, deviceId: cam.deviceId, tolCm: live.tolCm, facing: live.facing, variant: live.variant, footUp: live.footUp, handUp: live.handUp, parallax: live.parallax, wsUrl: outputs.ws.url }));
   }
 
   // ---------- main loop ----------
   frame(now) {
     const fresh = this.source.tick(now);
     if (this.s.show.running) this._showTick(now);
+    if (this.game) this._gameTick(now);
     if (fresh && this.s.mode === 'live' && this.s.live.running && this.engine && !this.poseBusy) this._liveStep(now);
   }
 
@@ -215,19 +214,6 @@ class App {
     return r;
   }
 
-  // phone
-  async startPhone() {
-    this.set({ phone: { ...this.s.phone, state: 'starting', detail: '' } });
-    this.phone?.stop();
-    this.phone = new PhoneReceiver({
-      onStream: (stream) => { this._startSource(() => this.source.useStream(stream, 'Phone camera (WebRTC)', 'phone'), 'Phone'); },
-      onState: (state, detail = '') => this.set({ phone: { ...this.s.phone, state, detail } }),
-    });
-    try { const { url } = await this.phone.start(this.s.phone.baseUrl); this.set({ phone: { ...this.s.phone, url } }); }
-    catch (e) { this.set({ phone: { ...this.s.phone, state: 'error', detail: e.type || e.message } }); }
-  }
-  setPhoneBase(v) { this.set({ phone: { ...this.s.phone, baseUrl: v } }); this.saveSettings(); }
-  stopPhone() { this.phone?.stop(); this.set({ phone: { ...this.s.phone, state: 'off', url: '' } }); }
 
   // ---------- demo ----------
   async startDemo() {
@@ -292,13 +278,18 @@ class App {
       if (replace) { this.holds = []; this.ignoredLeds = []; }
       for (const h of this.holds) delete h.cand; // candidate numbers belong to one analysis only
       if (this.board?.connected && this.board.lit.size) await this.board.allOff();
+      const t0 = performance.now();
       const img = await this.captureWall(4);
       if (!alive()) return;
+      const tCapture = performance.now() - t0;
       this.set({ detect: { ...this.s.detect, message: 'Detecting holds…' } });
       await sleep(30);
       await this._storeSnapshot(img);
+      const t1 = performance.now();
       this.analysis = analyzeWall(img);
+      const t2 = performance.now();
       this.seg = segmentHolds(this.analysis, this.pxPerCm);
+      this.timings = { captureMs: Math.round(tCapture), analyzeMs: Math.round(t2 - t1), segmentMs: Math.round(performance.now() - t2) };
       this.snapKey = this._geoKey();
       this.set({ detect: { ...this.s.detect, message: 'Checking for people in view…' } });
       const people = await this._findPeople();
@@ -308,6 +299,7 @@ class App {
       this._applyDetection(true);
       this.commit();
       const n = this.holds.filter((h) => !h.ghost).length;
+      this.log('detect', { holds: n, candidates: this.seg.candidates.length, otsu: this.seg.otsu, medianDiaCm: +this.seg.medianDia.toFixed(1), people, ...this.timings, params: { sensitivity: this.s.detect.sensitivity, contrast: this.s.detect.contrast } });
       this.set({ detect: { ...this.s.detect, busy: false, message: n ? `${n} holds found${people ? ` (ignored ${people} ${people > 1 ? 'people' : 'person'} in view)` : ''}` : 'No holds found. Check the corners and the wall size.' } });
     } catch (e) {
       this.set({ detect: { ...this.s.detect, busy: false, message: e.message } }); this.toast(e.message, 'error');
@@ -495,6 +487,7 @@ class App {
   // ---------- board ----------
   _wireBoard() {
     this.board.addEventListener('status', (e) => {
+      this.log('board', { state: e.detail.state, name: e.detail.name, detail: e.detail.detail });
       this.set({ board: { ...this.s.board, state: e.detail.state, name: e.detail.name } });
       if (e.detail.state === 'disconnected' && this.s.mode === 'live' && this.s.live.running && !this._reconnecting && !this._manualDisc) this._autoReconnect();
     });
@@ -542,8 +535,9 @@ class App {
     const N = this.s.board.ledCount, layout = scanLayout(N), F = layout.frames.length, total = F + 3, GREEN = { r: 0, g: 255, b: 0 };
     const step = async (i, msg) => { if (this._abortScan) throw new Error('Scan cancelled'); sc({ running: true, progress: i / total, message: msg }); };
     sc({ running: true, progress: 0, message: 'Preparing…', result: null, verify: null });
+    this.log('scan', { start: true, range: N, patterns: F });
     try {
-      if (this.s.cam.kind === 'camera' || this.s.cam.kind === 'phone') await this.lockCamera(true);
+      if (this.s.cam.kind === 'camera') await this.lockCamera(true);
       await step(0, 'Lights off, taking reference…');
       await this.board.allOff(); await sleep(500);
       const dark = await this.captureWall(4);
@@ -574,9 +568,11 @@ class App {
       this.board.setKnownPositions(leds.map((l) => l.pos));
       this._rebind(); this._renumber(); this.commit();
       sc({ running: false, progress: 1, message: 'Done', result, verify: ver });
+      this.log('scan', { done: true, ...result });
       this.saveSoon();
     } catch (e) {
       try { await this.board.allOff(); } catch { /* ignore */ }
+      this.log('scan', { failed: e.message });
       sc({ running: false, message: e.message });
       if (e.message !== 'Scan cancelled') this.toast(e.message, 'error');
     }
@@ -605,7 +601,7 @@ class App {
     const on = this.s.board.testing !== holdId;
     try { await this.board.setLeds(on ? [{ pos: h.led, r: 0, g: 255, b: 0 }] : []); this.set({ board: { ...this.s.board, testing: on ? holdId : null } }); } catch (e) { this.toast(e.message, 'error'); }
   }
-  async lightsOff() { try { await this.board?.allOff(); this.set({ board: { ...this.s.board, testing: null } }); } catch (e) { this.toast(e.message, 'error'); } }
+  async lightsOff() { await this._ledsOff(); this.set({ board: { ...this.s.board, testing: null } }); }
 
   /** Flash known LEDs one by one, find them in the raw image and solve the wall corners from them. */
   async _autoAlign() {
@@ -627,7 +623,7 @@ class App {
     };
     al({ running: true, message: 'Flashing reference LEDs…' });
     try {
-      if (this.s.cam.kind === 'camera' || this.s.cam.kind === 'phone') await this.lockCamera(true);
+      if (this.s.cam.kind === 'camera') await this.lockCamera(true);
       await this.board.allOff(); await sleep(500);
       const dark = await grab(3), { width: w, height: h } = this.source, imgPts = [], wallPts = [];
       for (const l of picks) {
@@ -682,6 +678,7 @@ class App {
       this.tracker = new ContactTracker(this.holds.filter((h) => !h.ghost), this.pxPerCm, { tolCm: l.tolCm });
       this.filters.clear(); this.prevPerson = null; this.track = null; this._lost = 99; this._tile = -1; this._rot = 0; this._lowq = 0; this.sideGuard = new SideGuard(); this._lat = 0; this._slow = 0;
       this.recorder.start(performance.now());
+      this.log('live', { start: true, variant: this.engine.variant, delegate: this.engine.delegate, holds: this.holds.length });
       this.source.alwaysFresh = true;
       this.set({ live: { ...this.s.live, loading: false, running: true, activeVariant: this.engine.variant, delegate: this.engine.delegate }, session: { recording: true, events: 0, duration: 0, replayT: null, playing: false, summary: null } });
       if (this.kilterSink) this.kilterSink.setEnabled(this.s.live.lightBoard && !!this.board?.connected);
@@ -693,6 +690,8 @@ class App {
   }
   async stopLive() {
     this._liveToken++;
+    this.log('live', { stop: true, events: this.recorder.events.length });
+    await this.stopGame(false);
     const now = performance.now();
     this.recorder.stop(now);
     this.set({ live: { ...this.s.live, loading: false, running: false, person: false, contacts: { LH: null, RH: null, LF: null, RF: null } }, session: { ...this.s.session, recording: false, duration: this.recorder.duration, events: this.recorder.events.length, summary: this.recorder.summary() } });
@@ -850,6 +849,75 @@ class App {
     }
   }
 
+  // ---------- debug report ----------
+  _gpuInfo() {
+    if (this._gpu !== undefined) return this._gpu;
+    try {
+      const gl = document.createElement('canvas').getContext('webgl'), ext = gl?.getExtension('WEBGL_debug_renderer_info');
+      this._gpu = gl ? { renderer: ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'unknown', vendor: ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : 'unknown' } : null;
+      gl?.getExtension('WEBGL_lose_context')?.loseContext();
+    } catch { this._gpu = null; }
+    return this._gpu;
+  }
+  /** Downscaled JPEG data URL of the straightened wall (or null). */
+  _debugImage(maxSide = 900) {
+    let src = null;
+    try {
+      if (this.snapshotValid) src = this.snapshotBitmap;
+      else if (this.source.active && this.Himg2wall) { const f = this._rectifyOnce(), c = document.createElement('canvas'); c.width = f.width; c.height = f.height; c.getContext('2d').putImageData(new ImageData(f.data, f.width, f.height), 0, 0); src = c; }
+      if (!src) return null;
+      const k = Math.min(1, maxSide / Math.max(src.width, src.height)), out = document.createElement('canvas');
+      out.width = Math.round(src.width * k); out.height = Math.round(src.height * k);
+      out.getContext('2d').drawImage(src, 0, 0, out.width, out.height);
+      return out.toDataURL('image/jpeg', 0.8);
+    } catch (e) { debugLog.warn('debug-image', e.message); return null; }
+  }
+  /**
+   * Everything needed to understand a problem remotely: environment, settings, measured numbers, recent events.
+   * Contains no personal data. The camera image is only included on request.
+   */
+  buildDebugReport({ includeImage = false } = {}) {
+    const s = this.s, wall = this.wallDims, holds = this.holds.filter((h) => !h.ghost);
+    const areas = holds.map((h) => h.area).sort((a, b) => a - b), q = (p) => (areas.length ? Math.round(areas[Math.min(areas.length - 1, Math.floor(areas.length * p))]) : null);
+    const confBins = [0, 0, 0, 0, 0];
+    for (const l of s.board.leds) confBins[Math.min(4, Math.floor(l.conf * 5))]++;
+    const track = this.source.stream?.getVideoTracks?.()[0];
+    const t = this.board?.t;
+    return {
+      format: 'bouldervision-debug', version: 1, createdAt: new Date().toISOString(),
+      app: { version: pkg.version },
+      environment: {
+        userAgent: navigator.userAgent, language: navigator.language, hardwareConcurrency: navigator.hardwareConcurrency, deviceMemoryGB: navigator.deviceMemory ?? null,
+        screen: `${screen.width}x${screen.height}@${devicePixelRatio}`, secureContext: window.isSecureContext, online: navigator.onLine,
+        gpu: this._gpuInfo(), webBluetooth: !!navigator.bluetooth, webSerial: 'serial' in navigator,
+      },
+      camera: { ...(({ kind, label, width, height, fps, rotation, mirror, locked, lockMsg, error }) => ({ kind, label, width, height, fps, rotation, mirror, locked, lockMsg, error }))(s.cam), trackSettings: track?.getSettings?.() ?? null, trackCapabilityKeys: track?.getCapabilities ? Object.keys(track.getCapabilities()) : null },
+      wall: { widthM: s.wall.wm, heightM: s.wall.hm, pixels: `${wall.RW}x${wall.RH}`, pxPerCm: +wall.pxPerCm.toFixed(2), corners: s.corners },
+      detection: {
+        params: { sensitivity: s.detect.sensitivity, contrast: s.detect.contrast, minDiaCm: s.detect.minDia, maxDiaCm: s.detect.maxDia }, hasAnalysis: s.detect.hasAnalysis, stale: s.detect.stale,
+        candidates: this.seg?.candidates.length ?? null, medianDiaCm: this.seg ? +this.seg.medianDia.toFixed(1) : null, otsu: this.seg?.otsu ?? null, timings: this.timings ?? null,
+        holds: { total: holds.length, auto: holds.filter((h) => h.source === 'auto').length, manual: holds.filter((h) => h.source === 'manual').length, ledMarkers: this.holds.filter((h) => h.ghost).length, withLed: holds.filter((h) => h.led != null).length },
+        areaPx: { min: q(0), p25: q(0.25), median: q(0.5), p75: q(0.75), max: q(1) }, deletedCandidates: this.deleted.size,
+      },
+      board: {
+        state: s.board.state, name: s.board.name, transport: t?.constructor?.name ?? null, ledRange: s.board.ledCount, ledsMapped: s.board.leds.length,
+        confidenceHistogram: { '0-0.2': confBins[0], '0.2-0.4': confBins[1], '0.4-0.6': confBins[2], '0.6-0.8': confBins[3], '0.8-1': confBins[4] },
+        lastScan: s.board.scan.result, bleChunkDelayMs: this.board?.delay ?? null, bleWithoutResponse: t?.fast !== false, lastLedUpdateMs: this.board?.lastMs ?? null,
+      },
+      live: { running: s.live.running, variant: s.live.variant, activeVariant: s.live.activeVariant, delegate: s.live.delegate, fps: s.live.fps, latencyMs: s.live.latency, toleranceCm: s.live.tolCm, footUpCm: s.live.footUp, handUpCm: s.live.handUp, perspective: s.live.parallax, facing: s.live.facing, swapLR: s.live.swapLR, session: s.session.summary },
+      profile: { name: s.profileName, kilter: s.kilter, numbering: s.numbering, numberStart: s.numberStart, routes: s.routes.items.length },
+      holds: holds.map((h) => ({ id: h.id, label: h.label, led: h.led ?? null, x: Math.round(h.cx), y: Math.round(h.cy), area: Math.round(h.area), source: h.source })),
+      leds: s.board.leds.map((l) => ({ pos: l.pos, x: Math.round(l.x), y: Math.round(l.y), conf: +l.conf.toFixed(2) })),
+      log: debugLog.entries,
+      image: includeImage ? this._debugImage() : undefined,
+    };
+  }
+  exportDebug({ includeImage = false } = {}) {
+    const report = this.buildDebugReport({ includeImage });
+    download(`bouldervision-debug-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.json`, JSON.stringify(report));
+    this.toast('Debug report saved. Send the file to whoever is helping you.', 'ok');
+  }
+
   // ---------- outputs ----------
   holdsMessage() {
     const { RW, RH, pxPerCm } = this.wallDims;
@@ -948,20 +1016,82 @@ class App {
   async stopShow() {
     this.set({ show: { ...this.s.show, running: false } });
     this.showLit = null;
-    try { if (this.board?.connected) await this.board.allOff(); } catch { /* ignore */ }
+    await this._ledsOff();
   }
   setShow(patch) { this.set({ show: { ...this.s.show, ...patch } }); if (patch.pattern && this.s.show.running) this._showT0 = performance.now(); }
   _showTick(now) {
     const sh = this.s.show, t = ((now - this._showT0) / 1000) * sh.speed;
     this.showLit = showFrame(sh.pattern, t, this.holds.filter((h) => !h.ghost), this.wallDims);
-    if (this.board?.connected && !this._showBusy && now - (this._showSent || 0) > 140) {
-      this._showSent = now; this._showBusy = true;
-      const leds = [];
-      for (const [id, col] of this.showLit) { const h = this._showById.get(id); if (h?.led != null) leds.push({ pos: h.led, ...col }); }
-      // Bluetooth is slow (20 bytes per packet): send only the brightest LEDs so the animation stays fluid
-      if (leds.length > MAX_SHOW_LEDS) leds.sort((a, b) => Math.max(b.r, b.g, b.b) - Math.max(a.r, a.g, a.b)).length = MAX_SHOW_LEDS;
-      this.board.setLeds(leds).catch(() => {}).finally(() => { this._showBusy = false; });
+    if (now - (this._showSent || 0) > GAME_LED_INTERVAL_MS) { this._showSent = now; this._pushLeds(this._litToLeds(this.showLit, this._showById)); }
+  }
+  /** Colours per hold -> LEDs (only holds with an LED; the brightest MAX_SHOW_LEDS, since Bluetooth is slow). */
+  _litToLeds(lit, byId) {
+    const leds = [];
+    for (const [id, col] of lit) { const h = byId.get(id); if (h?.led != null) leds.push({ pos: h.led, r: col.r, g: col.g, b: col.b }); }
+    if (leds.length > MAX_SHOW_LEDS) leds.sort((a, b) => Math.max(b.r, b.g, b.b) - Math.max(a.r, a.g, a.b)).length = MAX_SHOW_LEDS;
+    return leds;
+  }
+  /**
+   * Send a complete LED state to the board. Latest wins: while a frame is in flight only the newest pending state is kept,
+   * so a slow Bluetooth link never builds up a queue and identical frames are not resent.
+   */
+  async _pushLeds(leds) {
+    if (!this.board?.connected) return;
+    const sig = leds.map((l) => `${l.pos}:${l.r},${l.g},${l.b}`).sort().join('|');
+    if (sig === this._ledSig && !this._ledNext) return;
+    this._ledNext = { leds, sig };
+    if (this._ledBusy) return;
+    this._ledBusy = true;
+    try {
+      while (this._ledNext) {
+        const { leds: next, sig: nextSig } = this._ledNext;
+        this._ledNext = null;
+        await this.board.setLeds(next);
+        this._ledSig = nextSig;
+      }
+    } catch (e) { this.log('led', `update failed: ${e.message}`); }
+    finally { this._ledBusy = false; }
+  }
+  /** Everything off, and forget what we believed was lit. */
+  async _ledsOff() {
+    this._ledNext = null; this._ledSig = null;
+    try { if (this.board?.connected) await this.board.allOff(); } catch (e) { this.log('led', `all off failed: ${e.message}`); }
+  }
+
+  // ---------- games ----------
+  selectGame(id) { if (!this.s.game.active) this.set({ game: { ...this.s.game, id } }); }
+  startGame(id = this.s.game.id) {
+    if (!(this.s.mode === 'live' && this.s.live.running && this.tracker)) { this.toast('Start live tracking first: games use the climber\'s hand and foot contacts.'); return; }
+    this.stopGame(false);
+    const holds = this.holds.filter((h) => !h.ghost);
+    this._gameById = new Map(holds.map((h) => [h.id, h]));
+    this.game = createGame(id, holds, this.wallDims, rng((Date.now() ^ (performance.now() * 1000)) >>> 0));
+    this.game.start(performance.now());
+    this._gameOverSeen = false;
+    this.kilterSink?.setEnabled(false); // the game decides what lights; hands/feet lighting would fight it
+    this.log('game', { start: id, holds: holds.length });
+    this.set({ game: { ...this.s.game, id, active: true, state: this.game.state(performance.now()) } });
+  }
+  async stopGame(restoreSink = true) {
+    if (!this.game) return;
+    this.game = null; this.showLit = null;
+    this.set({ game: { ...this.s.game, active: false, state: null } });
+    await this._ledsOff();
+    if (restoreSink && this.s.live.running) this.kilterSink?.setEnabled(this.s.live.lightBoard && !!this.board?.connected);
+  }
+  _gameTick(now) {
+    const g = this.game, contacts = this.tracker?.contacts ?? { LH: null, RH: null, LF: null, RF: null };
+    g.update(now, contacts);
+    this.showLit = g.lit;
+    if (now - this._gameLed >= GAME_LED_INTERVAL_MS) { this._gameLed = now; this._pushLeds(this._litToLeds(g.lit, this._gameById)); }
+    if (g.over && !this._gameOverSeen) {
+      this._gameOverSeen = true;
+      const id = this.s.game.id, best = this.s.game.best;
+      if (g.score > (best[id] || 0)) { const next = { ...best, [id]: g.score }; this.set({ game: { ...this.s.game, best: next } }); try { localStorage.setItem(BEST_KEY, JSON.stringify(next)); } catch { /* storage unavailable */ } }
+      this.log('game', { over: id, score: g.score });
+      this._pushLeds([]);
     }
+    if (now - this._gameUi >= GAME_UI_INTERVAL_MS || g.over) { this._gameUi = now; this.set({ game: { ...this.s.game, state: g.state(now) } }); }
   }
 
   get activeRoute() { const r = this.s.routes; return r.items.find((i) => i.id === r.active) || null; }

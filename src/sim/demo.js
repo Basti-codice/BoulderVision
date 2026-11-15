@@ -2,7 +2,7 @@
 // Lets the whole pipeline (align -> detect -> LED scan -> live contacts -> LED output) run without hardware.
 import { solveHomography, applyH, ellipsePolygon } from '../core/geometry.js';
 import { decodeStream, decodeColor, MockTransport } from '../board/aurora.js';
-import { rng } from './rng.js';
+import { rng } from '../core/rng.js';
 
 const W = 1280, H = 720;
 const CORNERS = [[360, 50], [930, 40], [965, 690], [325, 672]]; // TL TR BR BL in the camera image

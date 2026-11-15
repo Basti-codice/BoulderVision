@@ -15,7 +15,7 @@ npm run dev        # http://localhost:5173  (camera and Bluetooth work on localh
 
 Use **Chrome or Edge** (Web Bluetooth and Web Serial are not available in Firefox/Safari).
 For a hosted copy, build with `npm run build` and serve `dist/` over **HTTPS** (e.g. GitHub Pages).
-For the phone-as-camera mode run `npm run dev:phone` instead (HTTPS with a self-signed certificate, the QR code then points to your laptop's Wi-Fi address) and open the printed https address on the laptop too.
+A phone works as the camera through a webcam app (Iriun Webcam, DroidCam, Camo, Windows 11 Phone Link): it then appears as a normal camera.
 
 No hardware at hand? Open the app, choose **Camera → Demo → Start demo wall**. It runs the complete workflow with a
 simulated wall, a virtual LED board and a virtual climber.
@@ -24,7 +24,7 @@ simulated wall, a virtual LED board and a virtual climber.
 
 | Step | What happens |
 | --- | --- |
-| **Camera** | Webcam, USB/phone webcam, phone via QR code (WebRTC), or a video/photo file. Rotate/mirror, lock exposure. |
+| **Camera** | Webcam, USB camera, a phone via a webcam app, or a video/photo file. Rotate/mirror, lock exposure. |
 | **Align** | Drag four handles onto the wall corners; a live straightened preview and grid show the result. Enter the real wall size. |
 | **Holds** | One click detects all holds. Three filters (sensitivity, min size, max size). Select / Add / Remove tools, undo/redo, numbering. |
 | **Board** (Kilter mode) | Connect over Bluetooth, scan LEDs (sparse row/column patterns, ~1 min, at most ~30 LEDs on at once), light test by clicking a hold. |
@@ -43,6 +43,19 @@ you only re-mark the corners (or use **Auto-align with LEDs**) and go live.
   wall view even without a board; the board gets the 36 brightest LEDs per frame (Bluetooth is slow).
 * **Export**: annotated image (PNG with numbered holds), hold list (CSV), hold map (JSON with LED map), and the complete
   board file (re-importable from the profile menu).
+
+## Games (Live mode)
+
+Two small games for testing the whole chain (camera, contacts, board): **Coins** (grab lit coin holds with your hands, quick
+grabs build a combo, golden coins every fifth, 60 s) and **Dodge** (red bars fall from the top, never cover more than 55 % of the
+width, speed grows; touching a red hold with any limb costs a life). Holds light on screen and, if a board is connected, on
+the board. The rules live in `src/game/games.js` (pure, seeded, unit tested).
+
+## Debug report
+
+*Save debug report* (bottom of the left panel) writes one JSON file with the environment, settings, measured numbers (frame
+rate, detection and LED statistics, Bluetooth timing), the hold and LED map and the last 400 events and errors. A camera
+image is only included if you tick the box. Nothing is sent anywhere; attach the file when asking for help.
 
 ## Live tracking
 
