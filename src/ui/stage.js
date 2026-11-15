@@ -2,6 +2,7 @@
 import { Warper } from '../core/warp.js';
 import { applyH, invert3, pointInPolygon } from '../core/geometry.js';
 import { SKELETON } from '../pose/pose.js';
+import { DEFAULT_MIN_CONFIDENCE } from '../cv/holds.js';
 
 import { ROLES } from '../outputs/lightshow.js';
 const ROLE_CSS = Object.fromEntries(Object.entries(ROLES).map(([k, v]) => [k, v.css]));
@@ -166,9 +167,9 @@ export class Stage {
       else if (hit) { const col = LIMB_COL[hit[0]]; ctx.shadowColor = col; ctx.shadowBlur = 16; ctx.fillStyle = col + 'aa'; ctx.fill(); ctx.shadowBlur = 0; ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.stroke(); }
       else if (sel) { ctx.fillStyle = 'rgba(255,176,32,.2)'; ctx.fill(); ctx.strokeStyle = '#ffb020'; ctx.lineWidth = 2.2; ctx.stroke(); }
       else {
-        const manual = h.source === 'manual';
-        ctx.fillStyle = hov ? 'rgba(255,255,255,.22)' : manual ? 'rgba(163,230,53,.12)' : 'rgba(56,189,248,.10)'; if (!live) ctx.fill();
-        ctx.strokeStyle = hov ? '#fff' : live ? 'rgba(56,189,248,.5)' : manual ? 'rgba(163,230,53,.95)' : 'rgba(56,189,248,.95)'; ctx.lineWidth = live ? 1.1 : 1.4; ctx.stroke();
+        const manual = h.source === 'manual', unsure = h.source === 'auto' && h.confidence != null && h.confidence < DEFAULT_MIN_CONFIDENCE;
+        ctx.fillStyle = hov ? 'rgba(255,255,255,.22)' : manual ? 'rgba(163,230,53,.12)' : unsure ? 'rgba(255,176,32,.12)' : 'rgba(56,189,248,.10)'; if (!live) ctx.fill();
+        ctx.strokeStyle = hov ? '#fff' : live ? 'rgba(56,189,248,.5)' : manual ? 'rgba(163,230,53,.95)' : unsure ? 'rgba(255,176,32,.95)' : 'rgba(56,189,248,.95)'; ctx.lineWidth = live ? 1.1 : 1.4; ctx.stroke();
       }
       ctx.restore();
       if (s.ui.labels && h.label != null && !h.ghost) {

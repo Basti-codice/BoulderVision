@@ -18,15 +18,14 @@ real climber while this was written. Go through this list once and note anything
 
 ## LED scan
 
-* The scan lights at most about 30 LEDs at a time (row/column patterns), so a weak power supply should not sag. If the
-  LEDs still look dim during the scan, tell me the LED count and what the board does.
-* Hold numbers are always consecutive (start at 0 or 1, your choice). The LED position is shown separately.
-
-* Keep people out of the camera view and lock the phone's exposure (the *Lock* option, or disable auto-exposure in
-  the camera app). Room lights should not flicker or change.
-* After the scan the Board step reports how many LEDs were found and a verification score (aim for above 97 %).
-  Amber dots in the wall view are low-confidence LEDs.
-* Dashed circles = an LED whose hold was not detected (empty hole or a hold the detector missed).
+* Run the Holds step first. The scan lights at most about 30 LEDs at a time (sparse patterns), then checks holds that stayed
+  open, then confirms every mapped LED individually. Expect about 2 minutes.
+* The result card says how many LEDs were confirmed one by one. LEDs that could not be confirmed are left out (never guessed).
+  Check the remaining holds with the light test (click a hold) and add the rest by hand if needed.
+* Keep people out of the camera view and lock the exposure (the *Lock* option, or disable auto-exposure in the camera app).
+  Room lights must not flicker or change.
+* Amber dots in the wall view are low-confidence LEDs; dashed circles are LEDs without a detected hold.
+* Hold numbers are always consecutive (start at 0 or 1). The LED position is shown separately.
 
 ## Live tracking
 

@@ -118,3 +118,84 @@ test('real dense wall photo: stable count, monotone sliders, no duplicate outlin
   // the automatic minimum size is fixed per photo: the sliders cannot change it
   assert.equal(filterHolds(seg, { sensitivity: 1 }).length >= filterHolds(seg, { sensitivity: 0 }).length, true);
 });
+
+// ---------- precision: one outline per hold, no doubled / merged / gap-spanning outlines ----------
+
+import { intersectionArea, polygonArea } from '../../src/core/geometry.js';
+import { uncertainHolds, DEFAULT_MIN_CONFIDENCE } from '../../src/cv/holds.js';
+
+function loadFixture(name, w, h) {
+  const raw = zlib.gunzipSync(fs.readFileSync(new URL(`../fixtures/${name}.rgba.gz`, import.meta.url)));
+  return { data: new Uint8ClampedArray(raw.buffer, raw.byteOffset, raw.length), width: w, height: h };
+}
+
+/** Pairs of outlines whose overlap exceeds `frac` of the smaller one (doubled or merged outlines), before any cutting. */
+function overlappingPairs(hs, frac = 0.1) {
+  let n = 0;
+  for (let i = 0; i < hs.length; i++) for (let j = i + 1; j < hs.length; j++) {
+    const a = hs[i], b = hs[j];
+    if (Math.hypot(a.cx - b.cx, a.cy - b.cy) > 4 * Math.sqrt(Math.max(a.area, b.area))) continue;
+    if (intersectionArea(a.poly, b.poly) > frac * Math.min(polygonArea(a.poly), polygonArea(b.poly))) n++;
+  }
+  return n;
+}
+
+const nestedCount = (hs) => hs.filter((a, i) => hs.some((b, j) => j !== i && b.area > a.area && pointInPolygon(b.poly, a.cx, a.cy))).length;
+
+test('two holds separated by a 1-3 px gap get one outline each, cut on the gap', () => {
+  const img = renderWall({ holds: [] });
+  const { data, width: w } = img;
+  const rect = (x0, y0, x1, y1) => { for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const i = (y * w + x) * 4; data[i] = data[i + 1] = data[i + 2] = 190; } };
+  for (const gap of [1, 2, 3]) { const y = 200 + gap * 200; rect(300, y, 360, y + 30); rect(360 + gap, y, 420 + gap, y + 30); } // 60x30 px each
+  const { holds } = detectHolds(analyzeWall(img), { pxPerCm: PX });
+  assert.equal(holds.length, 6, holds.map((h) => `${h.cx | 0},${h.cy | 0}:${h.area}`).join(' '));
+  for (const h of holds) assert.ok(h.area > 1500 && h.area < 2200, `outline ${h.cx | 0},${h.cy | 0} area ${h.area} (a block is 1800 px)`);
+  assert.equal(overlappingPairs(holds, 0.02), 0);
+});
+
+// Real photo: ~305 light grey holds with a bolt hole and a darker rim on a black board, many only 1-3 px apart.
+// 440x600, wall 2.4 m. Every hold was checked by eye on overlays: one outline per hold, touching pairs cut on the seam.
+test('real grey-holds wall: one tight outline per hold, stable over the sensitivity range', () => {
+  const seg = segmentHolds(analyzeWall(loadFixture('grey-holds-wall', 440, 600)), 440 / 240);
+  const counts = [0.3, 0.4, 0.5, 0.6, 0.8].map((s) => filterHolds(seg, { sensitivity: s }).length);
+  console.log('grey-holds wall counts', counts, 'candidates', seg.candidates.length);
+  assert.ok(counts.every((n) => n >= 290 && n <= 320), `counts ${counts}`);
+  assert.ok(Math.max(...counts) - Math.min(...counts) <= 3, `count varies: ${counts}`);
+  const hs = filterHolds(seg, { sensitivity: 0.5 }).map((h) => ({ ...h, poly: h.poly.map((p) => [...p]) }));
+  assert.equal(nestedCount(hs), 0, 'nested outlines');
+  assert.ok(overlappingPairs(hs) <= 2, `${overlappingPairs(hs)} outline pairs overlap by >10 %`);
+  const med = seg.medianArea;
+  for (const h of hs) assert.ok(h.area > 0.15 * med && h.area < 3 * med, `outline at ${h.cx | 0},${h.cy | 0}: area ${h.area}, median ${med}`);
+  assert.ok(uncertainHolds(seg).length <= 3, 'a clean photo has (almost) no uncertain candidates');
+  resolveOverlaps(hs);
+  for (let i = 0; i < hs.length; i++) for (let j = i + 1; j < hs.length; j++) assert.ok(!polygonsOverlap(hs[i].poly, hs[j].poly), 'outlines must not overlap');
+});
+
+// Far, low-resolution photo of a black overhang panel (~470 white holds incl. small foot chips), rectified by hand from
+// a perspective view: 600x600, 3.6 m. The right edge shows a strip of the room wall. Looser: nothing outrageous.
+test('real far overhang photo: no huge, nested or duplicated outlines, room wall at the border not taken', () => {
+  const seg = segmentHolds(analyzeWall(loadFixture('overhang-far', 600, 600)), 600 / 360);
+  const hs = filterHolds(seg, { sensitivity: 0.5 });
+  console.log('overhang count', hs.length, 'uncertain', uncertainHolds(seg).length);
+  assert.ok(hs.length >= 430 && hs.length <= 500, `count ${hs.length}`);
+  assert.ok(hs.every((h) => h.area < 4 * seg.medianArea), 'no huge outline');
+  assert.equal(nestedCount(hs), 0, 'nested outlines');
+  assert.ok(overlappingPairs(hs) <= 3, `${overlappingPairs(hs)} outline pairs overlap by >10 %`);
+  assert.ok(!hs.some((h) => h.cx > 585 && h.area > 0.5 * seg.medianArea), 'room-wall strip at the right border');
+});
+
+test('confidence: uncertain candidates are hidden by default, available on request, and are the wall-edge junk', () => {
+  const seg = segmentHolds(analyzeWall(loadFixture('dense-wall', 800, 800)), 800 / 360);
+  for (const c of seg.candidates) {
+    assert.ok(c.confidence >= 0 && c.confidence <= 1);
+    assert.ok(Object.values(c.cues).every((v) => v >= 0 && v <= 1));
+  }
+  const shown = filterHolds(seg, { sensitivity: 1 }), all = filterHolds(seg, { sensitivity: 1, minConfidence: 0 }), unc = uncertainHolds(seg, { sensitivity: 1 });
+  assert.ok(shown.every((c) => c.confidence >= DEFAULT_MIN_CONFIDENCE));
+  assert.equal(all.length, shown.length + unc.length);
+  assert.ok(unc.length >= 1 && unc.length <= 10, `${unc.length} uncertain`);
+  // what the default hides here (checked by eye) is junk cut by the image border: the dark strip beyond the wall at the
+  // right edge and a faint smudge at the bottom edge
+  assert.ok(unc.every((c) => c.touches), unc.map((c) => `${c.cx | 0},${c.cy | 0}`).join(' '));
+  assert.ok(unc.filter((c) => c.cx > 760).length >= 3, 'right-edge strip');
+});

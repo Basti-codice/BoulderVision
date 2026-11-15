@@ -140,3 +140,4 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .game-hud .hearts { color: #ff4757; font-size: 20px; letter-spacing: 3px; }
 .game-hud.over { border-color: var(--accent); }
 .hud-btns { display: flex; gap: 8px; margin-left: 10px; align-self: center; }
+.check.off { opacity: .45; }

@@ -27,11 +27,25 @@ simulated wall, a virtual LED board and a virtual climber.
 | **Camera** | Webcam, USB camera, a phone via a webcam app, or a video/photo file. Rotate/mirror, lock exposure. |
 | **Align** | Drag four handles onto the wall corners; a live straightened preview and grid show the result. Enter the real wall size. |
 | **Holds** | One click detects all holds. Three filters (sensitivity, min size, max size). Select / Add / Remove tools, undo/redo, numbering. |
-| **Board** (Kilter mode) | Connect over Bluetooth, scan LEDs (sparse row/column patterns, ~1 min, at most ~30 LEDs on at once), light test by clicking a hold. |
+| **Board** (Kilter mode) | Connect over Bluetooth, scan LEDs (see below, ~2 min), light test by clicking a hold, light test by clicking a hold. |
 | **Go live** | Pose tracking, contact detection, optional LED output, session recording and export. |
 
 Profiles (one per board) store corners, holds and the LED map in IndexedDB. For a new session with the same board
 you only re-mark the corners (or use **Auto-align with LEDs**) and go live.
+
+## How the LED scan works
+
+The light of an LED is a ring around the whole hold, so the scan measures brightness **per detected hold** (`src/cv/ledmap.js`):
+
+1. Sparse row/column patterns (never more than about 30 LEDs on at once; boards sag when many are lit). Each hold's region
+   (outline plus a thin ring) is compared across the patterns: the brightest x-pattern and y-pattern give the position.
+   A camera shift since the holds were detected is estimated and corrected. LEDs lit outside every hold become dashed markers.
+2. Holds that stayed open are checked with targeted frames: the LED strip runs in a zig-zag, so the likely numbers of a
+   hold follow from its neighbours; those LEDs are lit (far apart from each other) and the hold that reacts gets the number.
+3. Every mapped LED is confirmed on its own (one hold on, the others off). Anything that does not confirm is left out
+   instead of being guessed. The result card shows how many LEDs were confirmed.
+
+Run the Holds step first: the scan assigns LEDs to detected holds.
 
 ## Kilter extras (Board step)
 
@@ -67,6 +81,8 @@ image is only included if you tick the box. Nothing is sent anywhere; attach the
 * Robustness: while no climber is found the app searches the wall in overlapping tiles and tries the image upright and
   rotated by 90 degrees (horizontal bodies on steep walls confuse the model); once found, a tight crop follows the
   climber and the rotation is only changed when hands/feet are clearly better visible in another orientation.
+* Uncertain candidates (low confidence from contrast, compactness, size, shape, border) are hidden by default; *Also show uncertain
+  holds* shows them in amber. Precision first: it is better to add two or three holds by hand than to get duplicated or merged outlines.
 * Detection works in two stages: the wall is segmented **once per photo** into hold candidates (with colour distance, edge
   contrast, size, shape); the sliders (*Sensitivity*, *Edge contrast*, size limits) only filter these candidates. That makes
   them instant and monotone (more sensitive = superset), and hold ids stay stable while you move them. Bolt holes do not split

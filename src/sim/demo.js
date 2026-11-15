@@ -5,11 +5,12 @@ import { decodeStream, decodeColor, MockTransport } from '../board/aurora.js';
 import { rng } from '../core/rng.js';
 
 const W = 1280, H = 720;
+const UNUSED_POSITION_SHARE = 0.04; // share of LED positions without a hole
 const CORNERS = [[360, 50], [930, 40], [965, 690], [325, 672]]; // TL TR BR BL in the camera image
 
 export class DemoWorld {
-  constructor({ seed = 7, cols = 15, rows = 14, ledSlots = 500, replaceOnFirst = true, glow = 13 } = {}) {
-    this.glow = glow; // glow radius in camera pixels (~8 cm at the default framing)
+  constructor({ seed = 7, cols = 15, rows = 14, ledSlots = 500, replaceOnFirst = true, glow = 9 } = {}) {
+    this.glow = glow; // rim glow width in camera pixels
     this.width = W; this.height = H; this.wall = { RW: 1000, RH: 1000, widthM: 3.6, heightM: 3.6 };
     this.corners = CORNERS.map((c) => c.slice());
     this.H = solveHomography([[0, 0], [1000, 0], [1000, 1000], [0, 1000]], this.corners); // wall -> image
@@ -27,12 +28,14 @@ export class DemoWorld {
     // LED positions: increasing along snake rows with random gaps inside 0..ledSlots-1
     const all = [...this.holds.map((h) => h), ...this.empty.map((e) => e)];
     all.sort((a, b) => Math.round(b.y / 66) - Math.round(a.y / 66) || a.x - b.x);
-    const total = all.length, pool = new Set();
-    while (pool.size < total) pool.add(Math.floor(r() * ledSlots));
-    const positions = [...pool].sort((a, b) => a - b);
+    // Like a real board: positions run (almost) without gaps along the strip; a few are unused.
+    const total = all.length, positions = [];
+    for (let p = 0; positions.length < total && p < ledSlots; p++) if (r() >= UNUSED_POSITION_SHARE) positions.push(p);
+    if (positions.length < total) throw new Error('DemoWorld: ledSlots too small for the number of holes');
     all.forEach((e, i) => { e.led = positions[i]; });
     this.holds.forEach((h, i) => { h.id = i + 1; });
     this.leds = all.map((e) => ({ pos: e.led, x: e.x, y: e.y }));
+    this.ledShapes = new Map(all.map((e) => [e.led, e.rx ? { x: e.x, y: e.y, rx: e.rx + 1.5, ry: e.ry + 1.5, rot: e.rot, brightness: 0.55 + 0.45 * r() } : { x: e.x, y: e.y, rx: 9, ry: 9, rot: 0, brightness: 0.55 + 0.45 * r() }]));
     this._buildRoute();
     this.transport = new MockTransport((bytes) => this.applyBytes(bytes));
     this.dust = Array.from({ length: 40 }, () => ({ x: r() * 1000, y: r() * 1000, r: 1.5 + r() * 2 })); // chalk specks
@@ -126,15 +129,21 @@ export class DemoWorld {
       ctx.fillStyle = `rgb(${h.shade},${h.shade},${h.shade - 6})`; ctx.fill();
       ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 1.2; ctx.stroke();
     }
+    // The LED sits behind the hold: its light spills out as a coloured rim around the WHOLE outline (a hole without a
+    // hold shows a small ring). Every LED has its own brightness, like on a real board.
     ctx.globalCompositeOperation = 'lighter';
     for (const [pos, color] of this.lit) {
-      const led = this.leds.find((l) => l.pos === pos);
-      if (!led) continue;
-      const c = decodeColor(color), [x, y] = m(led.x, led.y), s = this.glow;
-      const gr = ctx.createRadialGradient(x, y, 2, x, y, s);
-      const col = (a) => `rgba(${Math.min(255, c.r * 1.1)},${Math.min(255, c.g * 1.1)},${Math.min(255, c.b * 1.1 + 25)},${a})`;
-      gr.addColorStop(0, col(0.95)); gr.addColorStop(0.5, col(0.5)); gr.addColorStop(1, col(0));
-      ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(x, y, s, 0, 7); ctx.fill();
+      const shape = this.ledShapes.get(pos);
+      if (!shape) continue;
+      const c = decodeColor(color), k = shape.brightness;
+      const rgb = (a) => `rgba(${Math.min(255, c.r * 1.1 * k)},${Math.min(255, c.g * 1.1 * k)},${Math.min(255, (c.b * 1.1 + 25) * k)},${a})`;
+      const poly = ellipsePolygon(shape.x, shape.y, shape.rx, shape.ry, 24, shape.rot).map(([x, y]) => m(x, y));
+      ctx.save();
+      ctx.beginPath(); poly.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath();
+      ctx.shadowColor = rgb(0.9); ctx.shadowBlur = this.glow * 0.7;
+      ctx.strokeStyle = rgb(0.95); ctx.lineWidth = Math.max(2.5, this.glow * 0.3); ctx.stroke();
+      ctx.shadowBlur = 0; ctx.fillStyle = rgb(0.12); ctx.fill();
+      ctx.restore();
     }
     ctx.globalCompositeOperation = 'source-over';
     if (this.climber) this._drawClimber(ctx, this.time(now), m);

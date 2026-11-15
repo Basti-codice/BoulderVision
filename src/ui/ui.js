@@ -159,6 +159,7 @@ function HoldsStep() {
       <${Slider} disabled=${!can} label="Sensitivity" value=${d.sensitivity} min=${0} max=${1} step=${0.01} fmt=${(v) => `${Math.round(v * 100)}%`} lo="fewer holds" hi="more holds" onInput=${(v) => app.setDetectParam({ sensitivity: v })} />
       <${Slider} disabled=${!can} label="Edge contrast" value=${d.contrast} min=${0} max=${1} step=${0.01} fmt=${(v) => (v === 0 ? 'off' : `${Math.round(v * 100)}%`)} lo="off" hi="only sharply outlined" onInput=${(v) => app.setDetectParam({ contrast: v })} />
       <${Slider} disabled=${!can} label="Ignore smaller than" value=${d.minDia} min=${0} max=${10} step=${0.5} fmt=${(v) => (v === 0 ? `Auto (${d.effMin || '–'} cm)` : `${v} cm`)} lo="auto: relative to typical hold" onInput=${(v) => app.setDetectParam({ minDia: v })} />
+      <label class=${`check ${can ? '' : 'off'}`}><input type="checkbox" disabled=${!can} checked=${d.showUncertain} onChange=${(e) => app.setDetectParam({ showUncertain: e.target.checked })} /><span>Also show uncertain holds (amber)</span></label>
       <${Slider} disabled=${!can} label="Ignore larger than" value=${d.maxDia} min=${10} max=${60} step=${1} fmt=${(v) => `${v} cm`} onInput=${(v) => app.setDetectParam({ maxDia: v })} />
     <//>
     <${Section} title="Clean up" right=${html`<span class="undo"><button disabled=${!st.canUndo} onClick=${() => app.undo()} title="Ctrl+Z">↶</button><button disabled=${!st.canRedo} onClick=${() => app.redo()} title="Ctrl+Y">↷</button></span>`}>
@@ -215,7 +216,6 @@ function ShowPanel() {
 function BoardStep() {
   const st = S((s) => s);
   const b = st.board, sc = b.scan, connected = b.state === 'connected', res = sc.result;
-  const verifyPct = res && res.verifyOk + res.verifyBad ? Math.round((100 * res.verifyOk) / (res.verifyOk + res.verifyBad)) : null;
   return html`<div class="step-body">
     ${!BleTransport.supported() && !st.demo && html`<div class="note bad">Web Bluetooth is not available in this browser. Use Chrome or Edge.</div>`}
     <${Section} title="Connection">
@@ -227,10 +227,13 @@ function BoardStep() {
       <p class="hint">The default covers every Kilter board. Only raise it if the scan reports LEDs near the end of the range. About ${Math.round(2 * Math.ceil(Math.sqrt(b.ledCount)) * 0.9)} seconds.</p>
       ${sc.running ? html`<div class="progress"><div style=${{ width: `${Math.round(sc.progress * 100)}%` }}></div></div><p class="hint center">${sc.message}</p><${Btn} kind="wide" onClick=${() => app.cancelScan()}>Cancel<//>` : html`<${Btn} kind="primary wide" disabled=${!connected || b.align.running} onClick=${() => app.scanLeds()}>${b.leds.length ? 'Scan again' : 'Scan LEDs'}<//>`}
       ${!sc.running && sc.message && !res && html`<p class="hint center">${sc.message}</p>`}
-      ${res && html`<div class="card"><b>${res.found} LEDs located</b> (highest position ${res.maxPos}) · ${st.holds.filter((h) => h.led != null && !h.ghost).length} matched to holds
-        ${verifyPct != null && html`<div class=${verifyPct >= 97 ? 'ok-t' : 'warn-t'}>Verification: ${verifyPct}% of LEDs behaved as predicted</div>`}
+      ${res && html`<div class="card"><b>${res.matched} holds matched to an LED</b> · ${res.found} LEDs located (highest position ${res.maxPos})
+        <div class=${res.unverified === 0 ? 'ok-t' : 'warn-t'}>${res.verifyOk} of ${res.verifyOk + res.verifyBad} mapped LEDs confirmed one by one${res.unverified ? `; ${res.unverified} could not be confirmed and were left out` : ''}</div>
+        ${res.probed > 0 && html`<div class="hint">${res.probed} holds were matched by targeted checks after the patterns.</div>`}
+        ${res.unassigned > 0 && html`<div class="warn-t">${res.unassigned} holds have no LED (empty hole, dark LED, or not recognised). Check them with the light test.</div>`}
+        ${(res.shiftPx?.[0] || res.shiftPx?.[1]) && html`<div class="hint">The camera had moved since the holds were detected: hold outlines were shifted by ${res.shiftPx[0]}, ${res.shiftPx[1]} px.</div>`}
         ${res.maxPos > res.range - Math.ceil(Math.sqrt(res.range)) && html`<div class="warn-t">LEDs found at the very end of the range: raise the range above and scan again.</div>`}
-        ${(res.rejected > Math.max(3, res.found * 0.1) || res.uncertain > 0) && html`<div class="warn-t">${res.rejected > Math.max(3, res.found * 0.1) ? `${res.rejected} unreadable spots ignored` : ''}${res.rejected > Math.max(3, res.found * 0.1) && res.uncertain ? ', ' : ''}${res.uncertain ? `${res.uncertain} low confidence (amber dots)` : ''}</div>`}
+        ${res.uncertain > 0 && html`<div class="warn-t">${res.uncertain} with low confidence (amber dots).</div>`}
         ${st.holds.some((h) => h.ghost) && html`<div class="hint">${st.holds.filter((h) => h.ghost).length} LEDs have no detected hold. They show as dashed circles; use "Add" in Holds if one is real.</div>`}</div>`}
     <//>
     <${Section} title="Use the board">

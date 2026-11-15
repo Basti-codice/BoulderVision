@@ -9,7 +9,8 @@ import { bindLeds } from '../core/binding.js';
 import { ContactTracker, LIMBS } from '../core/contact.js';
 import { numberHolds } from '../core/numbering.js';
 import { analyzeWall, segmentHolds, filterHolds, fitHoldAt } from '../cv/holds.js';
-import { scanLayout, spotImage, findSpots, decodeSpots, pickVerifySet, verifyMapping, brightestSpot } from '../cv/calibrate.js';
+import { scanLayout, spotImage, brightestSpot } from '../cv/calibrate.js';
+import { holdRegions, regionMeans, decodeHolds, orphanSpots, estimateShift, pathCheck, planProbes, evaluateProbe, confirmPlan, evaluateConfirm, DEFAULT_RING_CM } from '../cv/ledmap.js';
 import { AuroraBoard, BleTransport } from '../board/aurora.js';
 import { PoseEngine, SKELETON, pickClimber, limbPoints, limbQuality, SideGuard, VARIANTS } from '../pose/pose.js';
 import { Bus, WebSocketSink, SerialSink, KilterSink, SessionRecorder, download, downloadBlob } from '../outputs/sinks.js';
@@ -26,6 +27,7 @@ const clone = (o) => structuredClone(o);
 const SETTINGS_KEY = 'bv.settings';
 const MAX_SHOW_LEDS = 36;
 const BEST_KEY = 'bv.game.best';
+const MAX_PROBE_FRAMES = 40;       // per probing round: unusual boards must not turn the scan into an endless search
 const GAME_UI_INTERVAL_MS = 200;   // HUD refresh rate
 const GAME_LED_INTERVAL_MS = 120;  // minimum time between LED frames (Bluetooth is slow)
 
@@ -35,7 +37,7 @@ export const store = createStore({
   wall: { wm: 3.6, hm: 3.6 }, corners: null,
   cam: { status: 'off', kind: 'none', label: '', width: 0, height: 0, fps: 0, devices: [], deviceId: '', res: 1080, rotation: 0, mirror: false, locked: false, lockMsg: '', error: '' },
   holds: [], tool: 'select', selected: null, numbering: 'rows', numberStart: 1, canUndo: false, canRedo: false,
-  detect: { sensitivity: 0.5, contrast: 0.25, minDia: 0, maxDia: 30, effMin: 0, busy: false, hasAnalysis: false, stale: false, message: '' },
+  detect: { sensitivity: 0.5, contrast: 0.25, minDia: 0, maxDia: 30, showUncertain: false, effMin: 0, busy: false, hasAnalysis: false, stale: false, message: '' },
   board: { state: 'idle', name: '', ledCount: 1024, leds: [], rejected: 0, testing: null, scan: { running: false, progress: 0, message: '', result: null, verify: null }, align: { running: false, message: '' } },
   live: { footUp: 0, handUp: 0, parallax: 0, running: false, loading: false, variant: 'auto', activeVariant: '', delegate: '', fps: 0, latency: 0, person: false, contacts: { LH: null, RH: null, LF: null, RF: null }, tolCm: 2.5, facing: 'wall', swapLR: false, lightBoard: false, error: '' },
   outputs: { ws: { url: 'ws://localhost:8765', state: 'off', detail: '' }, serial: { state: 'off', detail: '' } },
@@ -314,7 +316,7 @@ class App {
   _applyDetection(fromRun = false) {
     if (!this.seg || (this.s.detect.busy && !fromRun)) return false; // sliders wait while a detection run is in progress
     const d = this.s.detect, px = this.pxPerCm;
-    const cands = filterHolds(this.seg, { sensitivity: d.sensitivity, contrast: d.contrast, minDiaCm: d.minDia, maxDiaCm: d.maxDia });
+    const cands = filterHolds(this.seg, { sensitivity: d.sensitivity, contrast: d.contrast, minDiaCm: d.minDia, maxDiaCm: d.maxDia, ...(d.showUncertain ? { minConfidence: 0 } : {}) });
     const keep = this.holds.filter((h) => h.source === 'manual');
     const prevId = new Map(this.holds.filter((h) => h.source === 'auto' && h.cand != null).map((h) => [h.cand, h.id]));
     const taken = new Set(keep.map((h) => h.cand).filter((v) => v != null));
@@ -385,7 +387,7 @@ class App {
   setUi(p) { this.set({ ui: { ...this.s.ui, ...p } }); }
   setNumberStart(n) { this.set({ numberStart: n ? 1 : 0 }); this._renumber(); this.saveSoon(); }
   setNumbering(mode) { this.set({ numbering: mode }); this._renumber(); this.saveSoon(); }
-  _snap() { const { sensitivity, contrast, minDia, maxDia } = this.s.detect; return { holds: clone(this.holds), ignoredLeds: [...this.ignoredLeds], nextId: this.nextId, leds: clone(this.s.board.leds), deleted: [...this.deleted], detect: { sensitivity, contrast, minDia, maxDia } }; }
+  _snap() { const { sensitivity, contrast, minDia, maxDia, showUncertain } = this.s.detect; return { holds: clone(this.holds), ignoredLeds: [...this.ignoredLeds], nextId: this.nextId, leds: clone(this.s.board.leds), deleted: [...this.deleted], detect: { sensitivity, contrast, minDia, maxDia, showUncertain } }; }
   _restore(s) {
     this.holds = clone(s.holds); this.ignoredLeds = [...s.ignoredLeds]; this.nextId = s.nextId; this.deleted = new Set(s.deleted || []);
     if (s.detect) this.set({ detect: { ...this.s.detect, ...s.detect } });
@@ -427,7 +429,7 @@ class App {
   addInRegion(r) {
     if (!this.seg) { this.toast('Run hold detection first.'); return 0; }
     const d = this.s.detect;
-    const found = filterHolds(this.seg, { sensitivity: 1.4, contrast: 0, minDiaCm: Math.max(1.5, (d.minDia || this.seg.minDiaEff) * 0.7), maxDiaCm: d.maxDia, region: r });
+    const found = filterHolds(this.seg, { sensitivity: 1.4, contrast: 0, minConfidence: 0, minDiaCm: Math.max(1.5, (d.minDia || this.seg.minDiaEff) * 0.7), maxDiaCm: d.maxDia, region: r });
     let n = 0;
     for (const c of found) {
       if (this._coversHold(c.poly, c.area)) continue;
@@ -527,48 +529,118 @@ class App {
   scanLeds() { return this._exclusive(() => this._scanLeds()); }
   autoAlign() { return this._exclusive(() => this._autoAlign()); }
 
+  /**
+   * Find which LED belongs to which hold. The light is a ring around the whole hold, so brightness is measured per hold
+   * (cv/ledmap.js). Phases: sparse row/column patterns (never more than ~sqrt(N) LEDs on at once) -> decode per hold
+   * -> targeted probing of holds/positions that stayed open -> every mapped LED is confirmed individually.
+   */
   async _scanLeds() {
     const sc = (p) => this.set({ board: { ...this.s.board, scan: { ...this.s.board.scan, ...p } } });
     if (!this.board?.connected) { this.toast('Connect the board first.', 'error'); return; }
     if (!this.Himg2wall) { this.toast('Mark the wall corners first.', 'error'); return; }
+    const holds = this.holds.filter((h) => !h.ghost);
+    if (holds.length < 8) { this.toast('Detect the holds first (Holds step): the LED scan assigns LEDs to detected holds.', 'error'); return; }
     this._abortScan = false;
-    const N = this.s.board.ledCount, layout = scanLayout(N), F = layout.frames.length, total = F + 3, GREEN = { r: 0, g: 255, b: 0 };
-    const step = async (i, msg) => { if (this._abortScan) throw new Error('Scan cancelled'); sc({ running: true, progress: i / total, message: msg }); };
+    const N = this.s.board.ledCount, layout = scanLayout(N), F = layout.frames.length, GREEN = { r: 0, g: 255, b: 0 };
+    const { RW, RH, pxPerCm } = this.wallDims;
+    let done = 0, total = F + 6;                                   // refined once the later phases are planned
+    const step = async (msg) => { if (this._abortScan) throw new Error('Scan cancelled'); sc({ running: true, progress: Math.min(0.98, done / total), message: msg }); };
+    const capture = async (positions) => {                         // light these LEDs, wait, take the signal
+      await this.board.setLeds(positions.map((pos) => ({ pos, ...GREEN }))); await sleep(380);
+      return this._captureSignal(dark, 2);
+    };
+    let dark = null;
     sc({ running: true, progress: 0, message: 'Preparing…', result: null, verify: null });
-    this.log('scan', { start: true, range: N, patterns: F });
+    this.log('scan', { start: true, range: N, patterns: F, holds: holds.length });
     try {
       if (this.s.cam.kind === 'camera') await this.lockCamera(true);
-      await step(0, 'Lights off, taking reference…');
+      await step('Lights off, taking reference…');
       await this.board.allOff(); await sleep(500);
-      const dark = await this.captureWall(4);
-      // Sparse patterns: never more than ~sqrt(N) LEDs on at once, so a weak board power supply does not sag.
+      dark = await this.captureWall(4);
+      done++;
+
+      // 1. sparse patterns
       const signals = [];
       for (let k = 0; k < F; k++) {
         const f = layout.frames[k];
-        await step(1 + k, `Pattern ${k + 1} of ${F} (${f.positions.length} LEDs on)…`);
-        await this.board.setLeds(f.positions.map((pos) => ({ pos, ...GREEN }))); await sleep(380);
-        signals.push(await this._captureSignal(dark, 2));
+        await step(`Pattern ${k + 1} of ${F} (${f.positions.length} LEDs on)…`);
+        signals.push(await capture(f.positions)); done++;
       }
       await this.board.allOff();
-      await step(1 + F, 'Decoding…');
-      const { RW, RH, pxPerCm } = this.wallDims;
-      const spots = findSpots(spotImage(layout, signals), RW, RH, pxPerCm);
-      const { leds, rejected } = decodeSpots(spots, signals, layout);
-      if (leds.length < 4) throw new Error(`Only ${leds.length} LEDs found. Check that the whole board is in view, that nothing covers it, and that the LEDs light up when you click a hold in the light test.`);
-      // verification: a different sparse pattern must light exactly the LEDs the mapping predicts
-      await step(2 + F, 'Verifying…');
-      const lit = pickVerifySet(leds, 36, 7);
-      await this.board.setLeds([...lit].map((pos) => ({ pos, ...GREEN }))); await sleep(380);
-      const sigV = await this._captureSignal(dark, 2);
+
+      // 2. decode per hold (after correcting a camera shift since the holds were detected)
+      await step('Decoding…');
+      const shift = estimateShift(holds, spotImage(layout, signals), RW, RH, { pxPerCm });
+      if (shift.dx || shift.dy) {
+        for (const h of this.holds) { h.poly = h.poly.map(([x, y]) => [x + shift.dx, y + shift.dy]); h.cx += shift.dx; h.cy += shift.dy; }
+        this.log('scan', { shiftedHoldsPx: [shift.dx, shift.dy], gain: shift.gain });
+      }
+      const labels = holdRegions(holds, RW, RH, Math.round(DEFAULT_RING_CM * pxPerCm));
+      const means = (sig) => regionMeans(labels, holds.length, sig);
+      const dec = decodeHolds(signals.map(means), layout);
+      const assigned = new Map(), conf = new Map();                   // holdIndex -> pos / confidence
+      dec.holds.forEach((d, k) => { if (d.pos !== null) { assigned.set(k, d.pos); conf.set(k, d.conf); } });
+      const orphans = orphanSpots(labels, signals, layout, RW, RH, pxPerCm, { decoded: dec.holds });
+      for (const o of orphans) if (o.supersedes != null) { assigned.delete(o.supersedes); conf.delete(o.supersedes); } // that hold only caught a neighbour's glow
+      const suspects = pathCheck(assigned, holds);
+      for (const x of suspects) { assigned.delete(x.holdIndex); conf.delete(x.holdIndex); }   // implausible neighbours: re-tested below
+      const afterScan = assigned.size;
+      this.log('scan', { decoded: afterScan, ofHolds: holds.length, orphans: orphans.length, suspects: suspects.length, noiseFloor: +dec.noiseFloor.toFixed(1), reasons: dec.holds.reduce((m, d) => { for (const r of d.reasons || []) m[r] = (m[r] || 0) + 1; return m; }, {}) });
+
+      // 3. targeted probing of holds without an LED and positions without a hold (up to two rounds)
+      let probed = 0;
+      for (let round = 0; round < 2; round++) {
+        const used = new Set([...assigned.values(), ...orphans.map((o) => o.pos)]);
+        const missing = []; for (let p = 0; p < N; p++) if (!used.has(p)) missing.push(p);
+        const open = holds.map((_, k) => k).filter((k) => !assigned.has(k));
+        const planned = planProbes(assigned, open, missing, holds, { pxPerCm });
+        const probes = planned.slice(0, MAX_PROBE_FRAMES);
+        if (planned.length > probes.length) this.log('scan', { probeFramesTruncated: planned.length, kept: probes.length });
+        if (!probes.length) break;
+        total = done + probes.length + 24;
+        let gained = 0;
+        for (let i = 0; i < probes.length; i++) {
+          await step(`Checking open holds, frame ${i + 1} of ${probes.length}…`);
+          const sig = await capture(probes[i].leds); done++;
+          for (const r of evaluateProbe(means(sig), probes[i])) {
+            if (r.holdIndex === null || assigned.has(r.holdIndex) || [...assigned.values()].includes(r.pos)) continue;
+            assigned.set(r.holdIndex, r.pos); conf.set(r.holdIndex, r.conf); gained++;
+          }
+        }
+        probed += gained;
+        if (!gained) break;
+      }
       await this.board.allOff();
-      const ver = verifyMapping(leds, lit, sigV);
-      const uncertain = leds.filter((l) => l.conf < 0.35).length, maxPos = leds.reduce((m, l) => Math.max(m, l.pos), 0);
-      const result = { found: leds.length, rejected: rejected.length, uncertain, verifyOk: ver.ok, verifyBad: ver.bad, maxPos, range: N };
-      this.set({ board: { ...this.s.board, leds: leds.map(({ pos, x, y, conf }) => ({ pos, x, y, conf })), rejected: rejected.length } });
+
+      // 4. confirm every mapped LED on its own (one hold on, all others off)
+      const plan = confirmPlan(assigned, holds, { pxPerCm });
+      total = done + plan.length + 2;
+      const cm = [];
+      for (let i = 0; i < plan.length; i++) {
+        await step(`Confirming, frame ${i + 1} of ${plan.length}…`);
+        cm.push(means(await capture(plan[i].leds))); done++;
+      }
+      await this.board.allOff();
+      const ver = evaluateConfirm(cm, plan, assigned, holds, { pxPerCm });
+      const failed = ver.holds.filter((x) => !x.ok);
+      for (const x of failed) { assigned.delete(x.holdIndex); conf.delete(x.holdIndex); }
+
+      // 5. result: one entry per LED at the centre of its hold (LEDs without a hold at their light spot)
+      const leds = [...assigned].map(([k, pos]) => ({ pos, x: holds[k].cx, y: holds[k].cy, conf: conf.get(k) ?? 0.5 }));
+      for (const o of orphans) if (!leds.some((l) => l.pos === o.pos)) leds.push({ pos: o.pos, x: o.x, y: o.y, conf: o.conf });
+      leds.sort((a, b) => a.pos - b.pos);
+      if (leds.length < 4) throw new Error(`Only ${leds.length} LEDs found. Check that the whole board is in view, that nothing covers it, and that the LEDs light up when you click a hold in the light test.`);
+      const maxPos = leds.reduce((m, l) => Math.max(m, l.pos), 0);
+      const result = {
+        found: leds.length, matched: assigned.size, orphans: orphans.length, unassigned: holds.length - assigned.size,
+        probed, fromPatterns: afterScan, unverified: failed.length, uncertain: leds.filter((l) => l.conf < 0.35).length,
+        verifyOk: ver.ok, verifyBad: failed.length, maxPos, range: N, shiftPx: [shift.dx, shift.dy],
+      };
+      this.set({ board: { ...this.s.board, leds } });
       this.board.setKnownPositions(leds.map((l) => l.pos));
       this._rebind(); this._renumber(); this.commit();
-      sc({ running: false, progress: 1, message: 'Done', result, verify: ver });
-      this.log('scan', { done: true, ...result });
+      sc({ running: false, progress: 1, message: 'Done', result, verify: { ok: ver.ok, bad: failed.length } });
+      this.log('scan', { done: true, ...result, failedConfirm: failed.map((x) => ({ pos: x.pos, reasons: x.reasons })).slice(0, 20) });
       this.saveSoon();
     } catch (e) {
       try { await this.board.allOff(); } catch { /* ignore */ }
@@ -954,7 +1026,7 @@ class App {
   // ---------- profiles ----------
   _profileData() {
     const s = this.s;
-    return { id: s.profileId, name: s.profileName, kilter: s.kilter, wall: s.wall, corners: s.corners, camRotation: s.cam.rotation, camMirror: s.cam.mirror, holds: this.holds.map(({ cand, ...h }) => h), ignoredLeds: this.ignoredLeds, nextId: this.nextId, numbering: s.numbering, numberStart: s.numberStart, detect: { sensitivity: s.detect.sensitivity, contrast: s.detect.contrast, minDia: s.detect.minDia, maxDia: s.detect.maxDia }, ledCount: s.board.ledCount, leds: s.board.leds, routes: s.routes.items, snapshot: this.snapshotBlob, holdCount: this.holds.filter((h) => !h.ghost).length };
+    return { id: s.profileId, name: s.profileName, kilter: s.kilter, wall: s.wall, corners: s.corners, camRotation: s.cam.rotation, camMirror: s.cam.mirror, holds: this.holds.map(({ cand, ...h }) => h), ignoredLeds: this.ignoredLeds, nextId: this.nextId, numbering: s.numbering, numberStart: s.numberStart, detect: { sensitivity: s.detect.sensitivity, contrast: s.detect.contrast, minDia: s.detect.minDia, maxDia: s.detect.maxDia, showUncertain: s.detect.showUncertain }, ledCount: s.board.ledCount, leds: s.board.leds, routes: s.routes.items, snapshot: this.snapshotBlob, holdCount: this.holds.filter((h) => !h.ghost).length };
   }
   saveSoon() { this.set({ saved: false }); clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
   async saveNow() {
