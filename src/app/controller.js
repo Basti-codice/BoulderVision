@@ -497,7 +497,8 @@ class App {
       const msg = e?.message || String(e);
       if (e?.name === 'NotFoundError' && /cancel/i.test(msg)) return; // the user closed the picker
       // Chrome also reports "picker not shown" (adapter off, permission blocked) as NotFoundError: say so instead of failing silently
-      this.toast(e?.name === 'NotFoundError' ? `${msg} Check that Bluetooth is on and that Bluetooth is not blocked for this site (lock icon in the address bar, Site settings).` : msg, 'error');
+      const hint = /adapter/i.test(msg) ? 'The computer reports no usable Bluetooth: switch Bluetooth on (and flight mode off) in Windows, then restart Chrome. Test at chrome://bluetooth-internals.' : 'Check that Bluetooth is not blocked for this site (lock icon in the address bar, Site settings).';
+      this.toast(e?.name === 'NotFoundError' ? `${msg} ${hint}` : msg, 'error');
     }
   }
   async disconnectBoard() { this._manualDisc = true; try { await this.board?.disconnect(); } catch (e) { this.toast(e.message, 'error'); } }
