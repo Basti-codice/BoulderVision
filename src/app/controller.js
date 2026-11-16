@@ -493,7 +493,12 @@ class App {
     this._manualDisc = false;
     if (!this.board || this.s.demo) { this.board = new AuroraBoard(new BleTransport()); this._wireBoard(); }
     try { await this.board.connect(); this.toast(`Connected to ${this.board.t.name}`, 'ok'); }
-    catch (e) { if (e?.name !== 'NotFoundError') this.toast(e.message || String(e), 'error'); }
+    catch (e) {
+      const msg = e?.message || String(e);
+      if (e?.name === 'NotFoundError' && /cancel/i.test(msg)) return; // the user closed the picker
+      // Chrome also reports "picker not shown" (adapter off, permission blocked) as NotFoundError: say so instead of failing silently
+      this.toast(e?.name === 'NotFoundError' ? `${msg} Check that Bluetooth is on and that Bluetooth is not blocked for this site (lock icon in the address bar, Site settings).` : msg, 'error');
+    }
   }
   async disconnectBoard() { this._manualDisc = true; try { await this.board?.disconnect(); } catch (e) { this.toast(e.message, 'error'); } }
   async _autoReconnect() {

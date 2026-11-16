@@ -78,13 +78,9 @@ export class BleTransport {
   get name() { return this.device?.name || 'Board'; }
   async request() {
     if (!BleTransport.supported()) throw new Error('Web Bluetooth is not available (use Chrome or Edge over HTTPS/localhost).');
-    try {
-      this.device = await navigator.bluetooth.requestDevice({ filters: [{ services: [ADVERTISED] }], optionalServices: [UART_SERVICE] });
-    } catch (e) {
-      if (e?.name === 'NotFoundError' && /cancel/i.test(e.message || '')) throw e;
-      // Some boards advertise only a name: offer name-prefixed devices as a fallback.
-      this.device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'Kilter' }, { namePrefix: 'Aurora' }], optionalServices: [UART_SERVICE] });
-    }
+    // One picker for every known way a board shows up (filters are OR-ed). A second request after a failed first one
+    // would run without the user gesture Chrome requires.
+    this.device = await navigator.bluetooth.requestDevice({ filters: [{ services: [ADVERTISED] }, { namePrefix: 'Kilter' }, { namePrefix: 'Aurora' }], optionalServices: [UART_SERVICE] });
     if (this._h) this.device.removeEventListener('gattserverdisconnected', this._h);
     this._h = () => { this.rx = null; this.onDisconnect(); };
     this.device.addEventListener('gattserverdisconnected', this._h);
