@@ -107,6 +107,10 @@ function CameraStep() {
     ${tab === 'file' && html`<div><p class="hint">Use a video or photo of the wall instead of a live camera. Great for trying the app away from the gym.</p><${Btn} kind="primary wide" onClick=${() => fileRef.current.click()}>Choose video or photo…<//><input ref=${fileRef} type="file" accept="video/*,image/*" hidden onChange=${(e) => e.target.files[0] && app.useFile(e.target.files[0])} /></div>`}
     ${tab === 'demo' && html`<div><p class="hint">A simulated wall with a virtual LED board and a virtual climber. Walks through the complete workflow without any hardware.</p><${Btn} kind="primary wide" onClick=${() => app.startDemo()}>Start demo wall<//></div>`}
     ${cam.error && html`<div class="note bad">${cam.error}</div>`}
+    <${Section} title="Camera mount">
+      <label class="check"><input type="checkbox" checked=${st.fixedCamera} onChange=${(e) => app.setFixedCamera(e.target.checked)} /><span>Fixed mount (tripod stays put)</span></label>
+      <p class="hint">On: corners and holds are kept when you load another picture, so a re-detect refines them. Off: every new photo or video starts a fresh setup.</p>
+    <//>
     ${cam.status === 'on' && html`<${Section} title="Image">
       <div class="row"><${Btn} onClick=${() => app.setOrientation({ rotation: (cam.rotation + 90) % 360 })}>Rotate 90° ↻<//><${Btn} kind=${cam.mirror ? 'active' : ''} onClick=${() => app.setOrientation({ mirror: !cam.mirror })}>Mirror<//></div>
       ${cam.kind === 'camera' && html`<label class="check"><input type="checkbox" checked=${cam.locked} onChange=${(e) => app.lockCamera(e.target.checked)} /><span>Lock exposure / white balance / focus</span></label>`}
@@ -139,12 +143,6 @@ function AlignStep() {
     <//>`}
     <${NextBtn} to="holds" disabled=${!st.corners} />
   </div>`;
-}
-
-function StaleBanner() {
-  const st = S((s) => s), n = st.holds.filter((h) => !h.ghost).length;
-  return html`<div class="note warn stale"><b>New photo.</b> The ${n} holds belong to the previous photo.
-    <div class="col-btns"><${Btn} kind="primary" onClick=${() => { app.goStep('holds'); app.detectReplacing(); }}>Detect holds in this photo<//><${Btn} onClick=${() => app.saveAsNewBoard()}>Keep the old board, start a new one<//><${Btn} onClick=${() => app.keepOldHolds()}>Keep the old holds (same wall)<//></div></div>`;
 }
 
 function HoldsStep() {
@@ -395,7 +393,7 @@ export function Root() {
   return html`<div class="app">
     <${Header} />
     <div class="main">
-      <aside class="panel left">${st.mode === 'live' ? html`<${LivePanel} />` : html`${st.detect.stale && html`<div class="stale-wrap"><${StaleBanner} /></div>`}<${Stepper} /><${Step} />`}<${Diagnostics} /></aside>
+      <aside class="panel left">${st.mode === 'live' ? html`<${LivePanel} />` : html`<${Stepper} /><${Step} />`}<${Diagnostics} /></aside>
       <${StageView} />
       <aside class="panel right">${st.mode === 'live' ? html`<${LiveRight} />` : html`<${Inspector} />`}</aside>
     </div>

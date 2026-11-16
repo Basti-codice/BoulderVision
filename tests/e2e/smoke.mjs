@@ -103,21 +103,32 @@ await page.click('.step:has-text("Camera")');
 await page.click('.seg button:has-text("Photo")');
 await page.setInputFiles('input[type=file][accept="video/*,image/*"]', new globalThis.URL('../fixtures/dense-wall.jpg', import.meta.url).pathname);
 await page.waitForFunction(() => window.__bv.s.cam.kind === 'image', null, { timeout: 15000 });
-const np = await page.evaluate(() => { const a = window.__bv; return { stale: a.s.detect.stale, analysis: !!a.analysis, hasAnalysis: a.s.detect.hasAnalysis, snapValid: a.snapshotValid, w: a.source.width, corners: a.s.corners.map((c) => c.map(Math.round)) }; });
+const np = await page.evaluate(() => { const a = window.__bv; return { holds: a.holds.filter((h) => !h.ghost).length, analysis: !!a.analysis, hasAnalysis: a.s.detect.hasAnalysis, snapValid: a.snapshotValid, w: a.source.width, corners: a.s.corners.map((c) => c.map(Math.round)) }; });
 console.log('   new photo', JSON.stringify(np));
-check('new photo: old analysis and snapshot are dropped, holds flagged', np.stale && !np.analysis && !np.hasAnalysis && !np.snapValid);
+check('new photo: old analysis, snapshot and holds are dropped', np.holds === 0 && !np.analysis && !np.hasAnalysis && !np.snapValid);
 check('new photo: corners restart inside the new picture', np.w === 800 && np.corners.every(([x, y]) => x >= 0 && x <= 800 && y >= 0 && y <= 800));
-await shot('04b-new-photo-banner');
+await shot('04b-new-photo');
 const dn = await page.evaluate(async () => {
   const a = window.__bv; a.set({ wall: { wm: 3.6, hm: 3.6 } });
   a.setCorners([[0, 0], [800, 0], [800, 800], [0, 800]]);
-  await a.detectReplacing();
+  await a.runDetect();
   const hs = a.holds.filter((h) => !h.ghost), nested = hs.filter((x, i) => hs.some((y, j) => j !== i && y.area > x.area && y.poly.some(() => false))).length;
-  return { n: hs.length, stale: a.s.detect.stale, hasAnalysis: a.s.detect.hasAnalysis, snapValid: a.snapshotValid };
+  return { n: hs.length, hasAnalysis: a.s.detect.hasAnalysis, snapValid: a.snapshotValid };
 });
 console.log('   detect on new photo', JSON.stringify(dn));
-check('detect on the new photo works (dense wall, ~490 holds)', dn.n > 440 && dn.n < 560 && !dn.stale && dn.hasAnalysis && dn.snapValid, `${dn.n} holds`);
-await page.evaluate(() => { const a = window.__bv; a.useFile && 0; });
+check('detect on the new photo works (dense wall, ~490 holds)', dn.n > 440 && dn.n < 560 && dn.hasAnalysis && dn.snapValid, `${dn.n} holds`);
+
+// fixed mount: loading the same photo again keeps corners and holds
+const fx = await page.evaluate(async () => {
+  const a = window.__bv; a.setFixedCamera(true);
+  return { before: { n: a.holds.filter((h) => !h.ghost).length, corners: JSON.stringify(a.s.corners) } };
+});
+await page.evaluate(() => { document.querySelector('input[type=file][accept="video/*,image/*"]').value = ''; }); // same file again must fire change
+await page.setInputFiles('input[type=file][accept="video/*,image/*"]', new globalThis.URL('../fixtures/dense-wall.jpg', import.meta.url).pathname);
+await page.waitForFunction((id) => window.__bv.sourceId > id, await page.evaluate(() => window.__bv.sourceId), { timeout: 15000 });
+const fx2 = await page.evaluate(() => { const a = window.__bv; return { n: a.holds.filter((h) => !h.ghost).length, corners: JSON.stringify(a.s.corners), analysis: !!a.analysis }; });
+check('fixed mount: same photo again keeps holds and corners', fx2.n === fx.before.n && fx2.corners === fx.before.corners && !fx2.analysis, `${fx.before.n} -> ${fx2.n}`);
+await page.evaluate(() => window.__bv.setFixedCamera(false));
 
 // back to the demo wall for the remaining checks
 await page.evaluate(async () => { const a = window.__bv; await a.startDemo(); a.setCorners(a.world.corners.map((c) => c.slice())); await a.runDetect(); });

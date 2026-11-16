@@ -34,10 +34,10 @@ const GAME_LED_INTERVAL_MS = 120;  // minimum time between LED frames (Bluetooth
 export const store = createStore({
   ready: false, profiles: [], profileId: null, profileName: 'My wall', saved: true,
   kilter: false, mode: 'setup', step: 'camera', demo: false,
-  wall: { wm: 3.6, hm: 3.6 }, corners: null,
+  wall: { wm: 3.6, hm: 3.6 }, corners: null, fixedCamera: false,
   cam: { status: 'off', kind: 'none', label: '', width: 0, height: 0, fps: 0, devices: [], deviceId: '', res: 1080, rotation: 0, mirror: false, locked: false, lockMsg: '', error: '' },
   holds: [], tool: 'select', selected: null, numbering: 'rows', numberStart: 1, canUndo: false, canRedo: false,
-  detect: { sensitivity: 0.5, contrast: 0.25, minDia: 0, maxDia: 30, showUncertain: false, effMin: 0, busy: false, hasAnalysis: false, stale: false, message: '' },
+  detect: { sensitivity: 0.5, contrast: 0.25, minDia: 0, maxDia: 30, showUncertain: false, effMin: 0, busy: false, hasAnalysis: false, message: '' },
   board: { state: 'idle', name: '', ledCount: 1024, leds: [], rejected: 0, testing: null, scan: { running: false, progress: 0, message: '', result: null, verify: null }, align: { running: false, message: '' } },
   live: { footUp: 0, handUp: 0, parallax: 0, running: false, loading: false, variant: 'auto', activeVariant: '', delegate: '', fps: 0, latency: 0, person: false, contacts: { LH: null, RH: null, LF: null, RF: null }, tolCm: 2.5, facing: 'wall', swapLR: false, lightBoard: false, error: '' },
   outputs: { ws: { url: 'ws://localhost:8765', state: 'off', detail: '' }, serial: { state: 'off', detail: '' } },
@@ -170,16 +170,17 @@ class App {
   async _afterSource() {
     this.sourceId++;
     this._invalidateAnalysis();
-    // a different PHOTO or VIDEO FILE is another picture of (maybe) another wall: ask what to do with the existing holds
-    if (['image', 'video'].includes(this.source.kind) && this.holds.some((h) => !h.ghost)) this.set({ detect: { ...this.s.detect, stale: true } });
-    else if (this.s.detect.stale) this.set({ detect: { ...this.s.detect, stale: false } });
+    // Holds and corners belong to the picture they were made for. A different photo or video file is a new setup,
+    // unless the camera is on a fixed mount: then the geometry is the same and both are kept.
+    const picture = ['image', 'video'].includes(this.source.kind), fresh = picture && !this.s.fixedCamera;
+    if (fresh && this.holds.some((h) => !h.ghost)) { this.clearHolds(); this.toast('New picture: holds cleared. Ctrl+Z brings them back.'); }
     this.source.setOrientation({ rotation: this.s.cam.rotation, mirror: this.s.cam.mirror });
     for (let i = 0; i < 40 && !this.source.tick(performance.now()); i++) await sleep(50);
     this._camChanged();
     // corners belong to a camera view: keep them for the same resolution, scale them for the same aspect, else start over
     const dims = [this.source.width, this.source.height], prev = this._srcDims;
     if (dims[0]) {
-      if (!this.s.corners || ['image', 'video'].includes(this.source.kind)) this.setCorners(this.defaultCorners(), { save: false });
+      if (!this.s.corners || fresh) this.setCorners(this.defaultCorners(), { save: false });
       else if (prev && (prev[0] !== dims[0] || prev[1] !== dims[1])) {
         const sameAspect = Math.abs(prev[0] / prev[1] - dims[0] / dims[1]) < 0.02;
         this.setCorners(sameAspect ? this.s.corners.map(([x, y]) => [x * dims[0] / prev[0], y * dims[1] / prev[1]]) : this.defaultCorners(), { save: false });
@@ -266,18 +267,16 @@ class App {
   // ---------- holds: detection ----------
   get pxPerCm() { return this.wallDims.pxPerCm; }
   /**
-   * Fresh detection run on the current picture. Deletions, the old analysis and (for a new photo) edited holds are
-   * discarded; edited holds survive only when re-detecting the SAME photo.
+   * Fresh detection run on the current picture. Deletions and the old analysis are discarded; holds the user edited or
+   * added survive (a new picture has already cleared them in _afterSource, unless the mount is fixed).
    */
   async runDetect() {
     if (this.s.detect.busy) return;
-    const replace = this.s.detect.stale;
     this._invalidateAnalysis();
     const run = this._runId;
     const alive = () => run === this._runId;
-    this.set({ detect: { ...this.s.detect, busy: true, stale: false, hasAnalysis: false, message: 'Capturing wall…' } });
+    this.set({ detect: { ...this.s.detect, busy: true, hasAnalysis: false, message: 'Capturing wall…' } });
     try {
-      if (replace) { this.holds = []; this.ignoredLeds = []; }
       for (const h of this.holds) delete h.cand; // candidate numbers belong to one analysis only
       if (this.board?.connected && this.board.lit.size) await this.board.allOff();
       const t0 = performance.now();
@@ -476,14 +475,7 @@ class App {
     this.holds = this.holds.filter((h) => h.source !== 'manual'); this.deleted = new Set(); this.ignoredLeds = [];
     this.set({ selected: null }); this._applyDetection(); this.commit();
   }
-  // a new photo was loaded while holds exist (see _afterSource)
-  keepOldHolds() { this.set({ detect: { ...this.s.detect, stale: false, message: 'Kept the old holds. Detect again to refresh them from this photo.' } }); }
-  async detectReplacing() { this.set({ detect: { ...this.s.detect, stale: true } }); await this.runDetect(); }
-  async saveAsNewBoard() {
-    await this.saveNow();
-    await this.newProfile('New wall', true);
-    this.set({ detect: { ...this.s.detect, stale: false, message: '' } });
-  }
+  setFixedCamera(on) { this.set({ fixedCamera: !!on }); this.saveSoon(); }
   endEdit() { this._rebind(); this._renumber(); this.commit(); }
 
   // ---------- board ----------
@@ -966,7 +958,7 @@ class App {
       camera: { ...(({ kind, label, width, height, fps, rotation, mirror, locked, lockMsg, error }) => ({ kind, label, width, height, fps, rotation, mirror, locked, lockMsg, error }))(s.cam), trackSettings: track?.getSettings?.() ?? null, trackCapabilityKeys: track?.getCapabilities ? Object.keys(track.getCapabilities()) : null },
       wall: { widthM: s.wall.wm, heightM: s.wall.hm, pixels: `${wall.RW}x${wall.RH}`, pxPerCm: +wall.pxPerCm.toFixed(2), corners: s.corners },
       detection: {
-        params: { sensitivity: s.detect.sensitivity, contrast: s.detect.contrast, minDiaCm: s.detect.minDia, maxDiaCm: s.detect.maxDia }, hasAnalysis: s.detect.hasAnalysis, stale: s.detect.stale,
+        params: { sensitivity: s.detect.sensitivity, contrast: s.detect.contrast, minDiaCm: s.detect.minDia, maxDiaCm: s.detect.maxDia }, hasAnalysis: s.detect.hasAnalysis,
         candidates: this.seg?.candidates.length ?? null, medianDiaCm: this.seg ? +this.seg.medianDia.toFixed(1) : null, otsu: this.seg?.otsu ?? null, timings: this.timings ?? null,
         holds: { total: holds.length, auto: holds.filter((h) => h.source === 'auto').length, manual: holds.filter((h) => h.source === 'manual').length, ledMarkers: this.holds.filter((h) => h.ghost).length, withLed: holds.filter((h) => h.led != null).length },
         areaPx: { min: q(0), p25: q(0.25), median: q(0.5), p75: q(0.75), max: q(1) }, deletedCandidates: this.deleted.size,
@@ -1026,7 +1018,7 @@ class App {
   // ---------- profiles ----------
   _profileData() {
     const s = this.s;
-    return { id: s.profileId, name: s.profileName, kilter: s.kilter, wall: s.wall, corners: s.corners, camRotation: s.cam.rotation, camMirror: s.cam.mirror, holds: this.holds.map(({ cand, ...h }) => h), ignoredLeds: this.ignoredLeds, nextId: this.nextId, numbering: s.numbering, numberStart: s.numberStart, detect: { sensitivity: s.detect.sensitivity, contrast: s.detect.contrast, minDia: s.detect.minDia, maxDia: s.detect.maxDia, showUncertain: s.detect.showUncertain }, ledCount: s.board.ledCount, leds: s.board.leds, routes: s.routes.items, snapshot: this.snapshotBlob, holdCount: this.holds.filter((h) => !h.ghost).length };
+    return { id: s.profileId, name: s.profileName, kilter: s.kilter, wall: s.wall, corners: s.corners, fixedCamera: s.fixedCamera, camRotation: s.cam.rotation, camMirror: s.cam.mirror, holds: this.holds.map(({ cand, ...h }) => h), ignoredLeds: this.ignoredLeds, nextId: this.nextId, numbering: s.numbering, numberStart: s.numberStart, detect: { sensitivity: s.detect.sensitivity, contrast: s.detect.contrast, minDia: s.detect.minDia, maxDia: s.detect.maxDia, showUncertain: s.detect.showUncertain }, ledCount: s.board.ledCount, leds: s.board.leds, routes: s.routes.items, snapshot: this.snapshotBlob, holdCount: this.holds.filter((h) => !h.ghost).length };
   }
   saveSoon() { this.set({ saved: false }); clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
   async saveNow() {
@@ -1039,9 +1031,9 @@ class App {
     this.history = []; this.future = []; this.analysis = null; this.seg = null; this.deleted = new Set(); this.peopleSegs = []; this._runId++; this.snapshot = null; this.snapshotBitmap = null; this.snapshotBlob = p.snapshot || null; this.snapKey = p.snapshot ? '*profile' : null;
     if (p.snapshot instanceof Blob) { const bmp = await createImageBitmap(p.snapshot); const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height; c.getContext('2d').drawImage(bmp, 0, 0); this.snapshotBitmap = c; }
     this.set({
-      profileId: p.id, profileName: p.name, kilter: !!p.kilter, wall: p.wall || { wm: 3.6, hm: 3.6 }, corners: p.corners || this.s.corners, holds: this.holds, numbering: p.numbering || 'rows', numberStart: p.numberStart ?? 1, selected: null,
+      profileId: p.id, profileName: p.name, kilter: !!p.kilter, wall: p.wall || { wm: 3.6, hm: 3.6 }, fixedCamera: !!p.fixedCamera, corners: p.corners || this.s.corners, holds: this.holds, numbering: p.numbering || 'rows', numberStart: p.numberStart ?? 1, selected: null,
       cam: { ...this.s.cam, rotation: p.camRotation || 0, mirror: !!p.camMirror },
-      detect: { ...this.s.detect, ...(p.detect || {}), hasAnalysis: false, busy: false, stale: false, message: '' },
+      detect: { ...this.s.detect, ...(p.detect || {}), hasAnalysis: false, busy: false, message: '' },
       routes: { items: p.routes || [], active: p.routes?.[0]?.id ?? null, brush: 'hand', sync: true }, show: { ...this.s.show, running: false }, kilterTab: 'test',
       board: { ...this.s.board, ledCount: Math.max(1024, p.ledCount || 0), leds: p.leds || [], scan: { ...this.s.board.scan, result: null, verify: null } },
       step: this.source.active ? (p.corners ? 'align' : 'align') : 'camera', mode: 'setup', saved: true, demo: false,

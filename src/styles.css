@@ -127,7 +127,6 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 
 .slider.off { opacity: .45; }
 .col-btns { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
-.stale-wrap { padding: 12px 12px 0; }
 
 .diag-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
 .small-btn { padding: 5px 10px; font-size: 12px; }
