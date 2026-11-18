@@ -194,8 +194,24 @@ test('confidence: uncertain candidates are hidden by default, available on reque
   assert.ok(shown.every((c) => c.confidence >= DEFAULT_MIN_CONFIDENCE));
   assert.equal(all.length, shown.length + unc.length);
   assert.ok(unc.length >= 1 && unc.length <= 10, `${unc.length} uncertain`);
-  // what the default hides here (checked by eye) is junk cut by the image border: the dark strip beyond the wall at the
-  // right edge and a faint smudge at the bottom edge
+  // what the default hides here (checked by eye) is junk cut by the image border: a faint smudge at the bottom edge
+  // (the dark strip beyond the wall at the right edge no longer produces candidates: the wall colour there is right now)
   assert.ok(unc.every((c) => c.touches), unc.map((c) => `${c.cx | 0},${c.cy | 0}`).join(' '));
-  assert.ok(unc.filter((c) => c.cx > 760).length >= 3, 'right-edge strip');
+  assert.ok(!shown.some((c) => c.cx > 785 && c.cy > 90 && c.cy < 150), 'no outline in the dark strip beyond the right edge');
+});
+
+// A light wall with grey holds: dense (holds cover about half of the lower rows), faint light-grey holds in the upper
+// left. The wall colour used to be taken from the holds in the crowded lower half (inverted result: only gaps between
+// holds were outlined) and the faint holds fell under the global thresholds. 679x680 px, 3.6 m.
+test('real light wall: the holds are outlined, not the gaps between them; faint holds are found too', () => {
+  const W = 679, px = W / 360, seg = segmentHolds(analyzeWall(loadFixture('light-wall', 679, 680)), px);
+  const hs = filterHolds(seg, { sensitivity: 0.5 }), dia = (h) => (2 * Math.sqrt(h.area / Math.PI)) / px;
+  const med = hs.map(dia).sort((a, b) => a - b)[hs.length >> 1];
+  console.log('light wall count', hs.length, 'median dia', med.toFixed(1));
+  assert.ok(hs.length >= 420 && hs.length <= 520, `count ${hs.length}`);
+  assert.ok(med > 8, `median diameter ${med.toFixed(1)} cm: outlines of gaps are small`);
+  assert.ok(hs.filter((h) => dia(h) < 3.5).length <= 5, 'tiny outlines in the gaps');
+  assert.ok(hs.filter((h) => h.cx < 340 && h.cy < 340).length >= 90, 'faint holds in the upper left');
+  assert.equal(nestedCount(hs), 0, 'nested outlines');
+  assert.ok(overlappingPairs(hs) <= 6, `${overlappingPairs(hs)} outline pairs overlap (cut apart later by resolveOverlaps)`);
 });

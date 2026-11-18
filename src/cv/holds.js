@@ -66,6 +66,14 @@ const TAIL_AREA_RATIO = 1.15;
 const MIN_CORE_PIXELS = 6;
 /** Outline: at most this many vertices (UI editing). */
 const OUTLINE_MAX_VERTS = 10;
+/** A grid cell whose biggest colour cluster covers at least this share is wall for sure (start of the propagation). */
+const ANCHOR_SHARE = 0.6;
+/** Largest colour step (luma + weighted chroma) between neighbouring wall cells; beyond it the wall colour is carried over. */
+const MAX_WALL_STEP = 28;
+/** Contrast equalisation (see equaliseContrast): rank of the "typical" cell among the cells sorted by p90, floor and maximum gain. */
+const CONTRAST_TYPICAL_RANK = 0.7;
+const CONTRAST_FLOOR = 0.5;
+const CONTRAST_MAX_GAIN = 2;
 /** Enclosed dark islands up to this diameter (cm) are bolt holes / T-nuts and become part of the hold. */
 const BOLT_HOLE_MAX_DIA_CM = 2.5;
 /** Default confidence below which filterHolds leaves a candidate out (uncertainHolds lists those). */
@@ -115,46 +123,46 @@ function cellClusters(Y, Cb, Cr, w, h, gx, gy) {
 }
 
 /**
- * Wall colour changes smoothly (lighting, vignette). Fit a smooth surface (quadratic, Tukey-weighted) to the cells
- * where one colour clearly dominates (those are wall), then in crowded cells pick the colour cluster that matches it.
- * In a crowded cell the holds can be the biggest cluster; this keeps them from becoming "background".
+ * Wall colour changes smoothly (lighting, vignette). Cells where one colour clearly dominates (ANCHOR_SHARE) are wall.
+ * From those the wall colour is propagated cell by cell: the undecided cell whose colour clusters best match the
+ * already decided neighbours is decided next, and takes the matching cluster (or, when none fits, the neighbours'
+ * colour: the cell is mostly holds). Local continuity is what tells wall from holds in crowded cells, where the holds
+ * can be the biggest cluster and a global smooth surface fitted to the few clear cells would drift off the real wall.
  */
-function robustSurface(values, gx, gy, w0) {
-  const P = 6, n = gx * gy, basis = (u, v) => [1, u, v, u * u, u * v, v * v];
-  const U = [], V = [];
-  for (let j = 0; j < gy; j++) for (let i = 0; i < gx; i++) { U.push((i + 0.5) / gx * 2 - 1); V.push((j + 0.5) / gy * 2 - 1); }
-  let wts = Float64Array.from(w0), coef = new Float64Array(P), scale = 5;
-  for (let it = 0; it < 8; it++) {
-    const A = Array.from({ length: P }, () => new Float64Array(P + 1));
-    for (let k = 0; k < n; k++) { if (!wts[k]) continue; const b = basis(U[k], V[k]); for (let r = 0; r < P; r++) { for (let c = 0; c < P; c++) A[r][c] += wts[k] * b[r] * b[c]; A[r][P] += wts[k] * b[r] * values[k]; } }
-    for (let c = 0; c < P; c++) A[c][c] += 1e-6;
-    for (let c = 0; c < P; c++) {
-      let piv = c; for (let r = c + 1; r < P; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
-      [A[c], A[piv]] = [A[piv], A[c]];
-      for (let r = 0; r < P; r++) { if (r === c) continue; const f = A[r][c] / A[c][c]; for (let k = c; k <= P; k++) A[r][k] -= f * A[c][k]; }
-    }
-    for (let c = 0; c < P; c++) coef[c] = A[c][P] / A[c][c];
-    const res = Array.from({ length: n }, (_, k) => values[k] - basis(U[k], V[k]).reduce((s, v, c) => s + v * coef[c], 0));
-    const used = res.filter((_, k) => w0[k]).map(Math.abs).sort((a, b) => a - b);
-    scale = Math.max(2.5, 1.4826 * (used[used.length >> 1] || 0));
-    wts = Float64Array.from(res, (r, k) => { if (!w0[k]) return 0; const t = r / (4.685 * scale); return Math.abs(t) < 1 ? (1 - t * t) ** 2 : 0; });
-  }
-  return (k) => basis(U[k], V[k]).reduce((s, v, c) => s + v * coef[c], 0);
-}
-
 function backgroundGrid(Y, Cb, Cr, w, h, gx, gy) {
   const cells = cellClusters(Y, Cb, Cr, w, h, gx, gy), n = cells.length;
-  let w0 = Float64Array.from(cells, (c) => (c.c1.share >= 0.6 ? 1 : 0));
-  if (w0.reduce((s, v) => s + v, 0) < 8) w0 = new Float64Array(n).fill(1); // everything is crowded: trust all cells
-  const sy = robustSurface(cells.map((c) => c.c1.y), gx, gy, w0), scb = robustSurface(cells.map((c) => c.c1.cb), gx, gy, w0), scr = robustSurface(cells.map((c) => c.c1.cr), gx, gy, w0);
-  const oy = new Float32Array(n), ocb = new Float32Array(n), ocr = new Float32Array(n);
-  for (let k = 0; k < n; k++) {
-    const py = sy(k), pcb = scb(k), pcr = scr(k);
-    const err = (c) => Math.abs(c.y - py) + 0.8 * (Math.abs(c.cb - pcb) + Math.abs(c.cr - pcr));
-    const cand = [cells[k].c1, cells[k].c2].filter(Boolean).sort((a, b) => err(a) - err(b))[0];
-    if (cand && err(cand) < 28) { oy[k] = cand.y; ocb[k] = cand.cb; ocr[k] = cand.cr; } else { oy[k] = py; ocb[k] = pcb; ocr[k] = pcr; }
+  const err = (c, r) => Math.abs(c.y - r.y) + 0.8 * (Math.abs(c.cb - r.cb) + Math.abs(c.cr - r.cr));
+  const out = new Array(n).fill(null);
+  let seeds = 0;
+  for (let k = 0; k < n; k++) if (cells[k].c1.share >= ANCHOR_SHARE) { out[k] = cells[k].c1; seeds++; }
+  if (!seeds) { // everything is crowded: start from the cell where one colour is most dominant
+    let b = 0; for (let k = 1; k < n; k++) if (cells[k].c1.share > cells[b].c1.share) b = k;
+    out[b] = cells[b].c1;
   }
-  return { oy, ocb, ocr };
+  const neighbours = (k) => {
+    const x = k % gx, y = (k / gx) | 0, r = [];
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if ((dx || dy) && nx >= 0 && ny >= 0 && nx < gx && ny < gy) r.push(ny * gx + nx);
+    }
+    return r;
+  };
+  for (let left = out.filter((c) => !c).length; left > 0; left--) {
+    let pick = -1, pickErr = Infinity, pickColour = null;
+    for (let k = 0; k < n; k++) {
+      if (out[k]) continue;
+      const known = neighbours(k).map((q) => out[q]).filter(Boolean);
+      if (!known.length) continue;
+      const ref = { y: 0, cb: 0, cr: 0 };
+      for (const c of known) { ref.y += c.y / known.length; ref.cb += c.cb / known.length; ref.cr += c.cr / known.length; }
+      let best = null, bestErr = Infinity;
+      for (const c of [cells[k].c1, cells[k].c2]) if (c && err(c, ref) < bestErr) { best = c; bestErr = err(c, ref); }
+      if (!best || bestErr >= MAX_WALL_STEP) { best = ref; bestErr = MAX_WALL_STEP; } // nothing continues the wall: carry it over
+      if (bestErr < pickErr) { pick = k; pickErr = bestErr; pickColour = best; }
+    }
+    out[pick] = pickColour;
+  }
+  return { oy: Float32Array.from(out, (c) => c.y), ocb: Float32Array.from(out, (c) => c.cb), ocr: Float32Array.from(out, (c) => c.cr) };
 }
 
 function interpolate(modes, gx, gy, w, h) {
@@ -190,6 +198,29 @@ function boxBlur(src, w, h, r) {
   return out;
 }
 
+/**
+ * Holds differ from the wall by very different amounts across one photo (light grey holds on a beige wall in one corner,
+ * dark ones in another). Per grid cell the strong end of the colour distances (p90) says how much the holds there stand
+ * out; weak cells are scaled up (smoothly, at most CONTRAST_MAX_GAIN, never down) towards the level of the typical
+ * cell, so one global Otsu level and one set of thresholds serve the whole wall. Cells without any hold keep their
+ * noise level in check by the floor CONTRAST_FLOOR.
+ */
+function equaliseContrast(dE, w, h, gx, gy) {
+  const n = gx * gy, p90 = new Float32Array(n), hist = new Uint32Array(256), cw = w / gx, chh = h / gy;
+  for (let cy = 0; cy < gy; cy++) for (let cx = 0; cx < gx; cx++) {
+    hist.fill(0);
+    let m = 0;
+    for (let y = Math.floor(cy * chh); y < Math.floor((cy + 1) * chh); y += 2) for (let x = Math.floor(cx * cw); x < Math.floor((cx + 1) * cw); x += 2) { hist[Math.min(255, dE[y * w + x] | 0)]++; m++; }
+    let acc = 0, k = 0;
+    while (k < 255 && acc + hist[k] < 0.9 * m) acc += hist[k++];
+    p90[cy * gx + cx] = k;
+  }
+  const typical = [...p90].sort((a, b) => a - b)[Math.floor(CONTRAST_TYPICAL_RANK * (n - 1))];
+  const gain = Float32Array.from(p90, (v) => Math.min(CONTRAST_MAX_GAIN, Math.max(1, typical / Math.max(v, CONTRAST_FLOOR * typical))));
+  const map = interpolate(gain, gx, gy, w, h);
+  for (let i = 0; i < dE.length; i++) dE[i] *= map[i];
+}
+
 /** img: {data: RGBA Uint8ClampedArray, width, height}. Returns the colour-distance map. */
 export function analyzeWall(img) {
   const { data, width: w, height: h } = img, N = w * h;
@@ -209,6 +240,7 @@ export function analyzeWall(img) {
     raw[i] = Math.sqrt(dy * dy + 1.2 * (db * db + dr * dr));
   }
   const dE = boxBlur(raw, w, h, 1);
+  equaliseContrast(dE, w, h, gx, gy);
   // Otsu on the clipped histogram
   const hist = new Float64Array(256);
   for (let i = 0; i < N; i++) hist[Math.min(255, dE[i] | 0)]++;
