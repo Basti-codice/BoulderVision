@@ -17,6 +17,7 @@ import { Bus, WebSocketSink, SerialSink, KilterSink, SessionRecorder, download, 
 import { showFrame, ROLES } from '../outputs/lightshow.js';
 import { debugLog } from '../core/debuglog.js';
 import { createGame } from '../game/games.js';
+import { buildLayout, composeWall, isReserved } from '../game/wallhud.js';
 import { rng } from '../core/rng.js';
 import pkg from '../../package.json';
 import { DemoWorld, DemoPose } from '../sim/demo.js';
@@ -27,6 +28,7 @@ const clone = (o) => structuredClone(o);
 const SETTINGS_KEY = 'bv.settings';
 const MAX_SHOW_LEDS = 36;
 const BEST_KEY = 'bv.game.best';
+const GAME_OPTS_KEY = 'bv.game.opts';
 const MAX_PROBE_FRAMES = 40;       // per probing round: unusual boards must not turn the scan into an endless search
 const GAME_UI_INTERVAL_MS = 200;   // HUD refresh rate
 const GAME_LED_INTERVAL_MS = 120;  // minimum time between LED frames (Bluetooth is slow)
@@ -43,7 +45,7 @@ export const store = createStore({
   outputs: { ws: { url: 'ws://localhost:8765', state: 'off', detail: '' }, serial: { state: 'off', detail: '' } },
   session: { recording: false, events: 0, duration: 0, replayT: null, playing: false, summary: null },
   toast: null, ui: { labels: true, grid: true },
-  game: { id: 'coins', active: false, state: null, best: { coins: 0, dodge: 0 } },
+  game: { id: 'coins', active: false, state: null, best: { coins: 0, dodge: 0 }, opts: { difficulty: 'medium', hud: true }, info: { onWall: false, hud: false, playable: 0 } },
   kilterTab: 'test', show: { running: false, pattern: 'rainbow', speed: 1 }, routes: { items: [], active: null, brush: 'hand', sync: true },
 });
 
@@ -64,7 +66,7 @@ class App {
     this.ws = new WebSocketSink((state, detail = '') => this.set({ outputs: { ...this.s.outputs, ws: { ...this.s.outputs.ws, state, detail } } }));
     this.serial = new SerialSink((state, detail = '') => this.set({ outputs: { ...this.s.outputs, serial: { state, detail } } }));
     this.bus.on((m) => { this.recorder.handle(m); this.ws.handle(m); this.serial.handle(m); this.kilterSink?.handle(m); });
-    this.showLit = null; this.game = null; this._ledSig = null; this._ledNext = null; this._ledBusy = false; this._gameUi = 0; this._gameLed = 0;
+    this.showLit = null; this.showZones = null; this.showLeds = null; this._gameLayout = null; this._gameHud = false; this.game = null; this._ledSig = null; this._ledNext = null; this._ledBusy = false; this._gameUi = 0; this._gameLed = 0;
     this.source.addEventListener('change', () => this._camChanged());
     this._lastUi = 0;
   }
@@ -83,7 +85,7 @@ class App {
       live: { ...this.s.live, tolCm: st.tolCm ?? 2.5, facing: st.facing || 'wall', variant: st.variant || 'auto', footUp: st.footUp ?? 0, handUp: st.handUp ?? 0, parallax: st.parallax ?? 0 },
       outputs: { ...this.s.outputs, ws: { ...this.s.outputs.ws, url: st.wsUrl || this.s.outputs.ws.url } },
     });
-    try { this.set({ game: { ...this.s.game, best: { ...this.s.game.best, ...JSON.parse(localStorage.getItem(BEST_KEY) || '{}') } } }); } catch { /* ignore corrupt storage */ }
+    try { this.set({ game: { ...this.s.game, best: { ...this.s.game.best, ...JSON.parse(localStorage.getItem(BEST_KEY) || '{}') }, opts: { ...this.s.game.opts, ...JSON.parse(localStorage.getItem(GAME_OPTS_KEY) || '{}') } } }); } catch { /* ignore corrupt storage */ }
     try { this.set({ profiles: await profiles.listProfiles() }); } catch (e) { console.warn('profiles unavailable', e); }
     const last = localStorage.getItem('bv.lastProfile');
     if (last && this.s.profiles.some((p) => p.id === last)) await this.loadProfile(last); else await this.newProfile('My wall', false);
@@ -1130,21 +1132,42 @@ class App {
 
   // ---------- games ----------
   selectGame(id) { if (!this.s.game.active) this.set({ game: { ...this.s.game, id } }); }
+  setGameOpts(patch) {
+    if (this.s.game.active) return;
+    const opts = { ...this.s.game.opts, ...patch };
+    this.set({ game: { ...this.s.game, opts } });
+    try { localStorage.setItem(GAME_OPTS_KEY, JSON.stringify(opts)); } catch { /* storage unavailable */ }
+  }
+  /**
+   * What the game may use. With an LED map only holds that have an LED are playable (a hold without light would be an
+   * invisible coin or trap), and with the status strips on, the strips' LEDs are not. Without any LED map every hold is
+   * (screen only).
+   */
+  _gamePlan() {
+    const holds = this.holds.filter((h) => !h.ghost), mapped = holds.some((h) => h.led != null);
+    const layout = this.s.board.leds.length ? buildLayout(this.s.board.leds, this.wallDims.pxPerCm) : null;
+    const onWall = !!(this.board?.connected && mapped);
+    const hud = onWall && this.s.game.opts.hud && !!layout?.hud;
+    const playable = mapped ? holds.filter((h) => h.led != null && !(hud && isReserved(layout, h.led))) : holds;
+    return { holds: playable, layout: onWall ? layout : null, hud, onWall };
+  }
   startGame(id = this.s.game.id) {
     if (!(this.s.mode === 'live' && this.s.live.running && this.tracker)) { this.toast('Start live tracking first: games use the climber\'s hand and foot contacts.'); return; }
+    const plan = this._gamePlan();
+    if (plan.holds.length < 8) { this.toast('Too few playable holds. Scan the LEDs first so the holds have lights.', 'error'); return; }
     this.stopGame(false);
-    const holds = this.holds.filter((h) => !h.ghost);
-    this._gameById = new Map(holds.map((h) => [h.id, h]));
-    this.game = createGame(id, holds, this.wallDims, rng((Date.now() ^ (performance.now() * 1000)) >>> 0));
+    this._gameLayout = plan.layout; this._gameHud = plan.hud;
+    this._gameById = new Map(plan.holds.map((h) => [h.id, h]));
+    this.game = createGame(id, plan.holds, this.wallDims, rng((Date.now() ^ (performance.now() * 1000)) >>> 0), this.s.game.opts.difficulty);
     this.game.start(performance.now());
-    this._gameOverSeen = false;
+    this._gameOverSeen = false; this._gameLed = 0;
     this.kilterSink?.setEnabled(false); // the game decides what lights; hands/feet lighting would fight it
-    this.log('game', { start: id, holds: holds.length });
-    this.set({ game: { ...this.s.game, id, active: true, state: this.game.state(performance.now()) } });
+    this.log('game', { start: id, difficulty: this.s.game.opts.difficulty, playable: plan.holds.length, onWall: plan.onWall, hud: plan.hud });
+    this.set({ game: { ...this.s.game, id, active: true, state: this.game.state(performance.now()), info: { onWall: plan.onWall, hud: plan.hud, playable: plan.holds.length } } });
   }
   async stopGame(restoreSink = true) {
     if (!this.game) return;
-    this.game = null; this.showLit = null;
+    this.game = null; this.showLit = null; this.showZones = null; this.showLeds = null; this._gameLayout = null;
     this.set({ game: { ...this.s.game, active: false, state: null } });
     await this._ledsOff();
     if (restoreSink && this.s.live.running) this.kilterSink?.setEnabled(this.s.live.lightBoard && !!this.board?.connected);
@@ -1152,15 +1175,25 @@ class App {
   _gameTick(now) {
     const g = this.game, contacts = this.tracker?.contacts ?? { LH: null, RH: null, LF: null, RF: null };
     g.update(now, contacts);
-    this.showLit = g.lit;
-    if (now - this._gameLed >= GAME_LED_INTERVAL_MS) { this._gameLed = now; this._pushLeds(this._litToLeds(g.lit, this._gameById)); }
     if (g.over && !this._gameOverSeen) {
       this._gameOverSeen = true;
       const id = this.s.game.id, best = this.s.game.best;
-      if (g.score > (best[id] || 0)) { const next = { ...best, [id]: g.score }; this.set({ game: { ...this.s.game, best: next } }); try { localStorage.setItem(BEST_KEY, JSON.stringify(next)); } catch { /* storage unavailable */ } }
-      this.log('game', { over: id, score: g.score });
-      this._pushLeds([]);
+      if (g.score > (best[id] || 0)) {
+        g.record = true;
+        const next = { ...best, [id]: g.score };
+        this.set({ game: { ...this.s.game, best: next } });
+        try { localStorage.setItem(BEST_KEY, JSON.stringify(next)); } catch { /* storage unavailable */ }
+      }
+      this.log('game', { over: id, score: g.score, record: g.record });
     }
+    // what the wall shows: target LEDs, obstacle areas (every LED inside, bound to a hold or not), status strips, effects
+    const out = g.output(now), holdLeds = [];
+    for (const [id, color] of out.lit) { const h = this._gameById.get(id); if (h?.led != null) holdLeds.push({ pos: h.led, color }); }
+    const frame = composeWall(this._gameLayout, { holdLeds, zones: out.zones, hud: out.hud, fx: out.fx }, { hudOn: this._gameHud });
+    const at = new Map(this.s.board.leds.map((l) => [l.pos, l]));
+    this.showLit = out.lit; this.showZones = out.zones;
+    this.showLeds = frame.map((l) => ({ ...l, x: at.get(l.pos)?.x, y: at.get(l.pos)?.y })).filter((l) => l.x != null);
+    if (now - this._gameLed >= GAME_LED_INTERVAL_MS) { this._gameLed = now; this._pushLeds(frame); }
     if (now - this._gameUi >= GAME_UI_INTERVAL_MS || g.over) { this._gameUi = now; this.set({ game: { ...this.s.game, state: g.state(now) } }); }
   }
 

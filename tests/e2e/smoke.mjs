@@ -246,23 +246,33 @@ console.log(`   live: ${agree}/${total} limb samples on the right hold, ${wrong}
 check('live: contacts found', total >= 20);
 check('live: >= 90% correct hold when in contact', agree / Math.max(1, total) >= 0.9);
 check('live: board LEDs follow contacts', samples.some((s) => s.lit.length >= 3));
-// --- games (use the live contacts, light holds on screen and board)
+// --- games (use the live contacts; everything is shown on the wall: targets, obstacles, countdown, status strips)
 const games = await page.evaluate(async () => {
   const a = window.__bv, wait = (ms) => new Promise((r) => setTimeout(r, ms)), out = {};
   a.setLive({ lightBoard: false }); await wait(500); // hand/foot lighting resumes after a game, so switch it off to see only the game
-  a.startGame('coins'); await wait(3800);
-  out.coins = { phase: a.game.state(performance.now()).phase, coins: a.game.coins.length, screen: a.showLit?.size ?? 0, board: a.world.lit.size, hud: a.s.game.active };
+  a.setGameOpts({ hud: true, difficulty: 'medium' });
+  a.startGame('coins'); await wait(700);
+  out.countdown = { fx: a.game.output(performance.now()).fx?.kind, board: a.world.lit.size };
+  await wait(3100);
+  out.coins = { phase: a.game.state(performance.now()).phase, coins: a.game.coins.length, screen: a.showLit?.size ?? 0, board: a.world.lit.size, hud: a.s.game.active, onWall: a.s.game.info.onWall, hudOn: a.s.game.info.hud, playable: a.s.game.info.playable, dots: a.showLeds?.length ?? 0 };
   await a.stopGame(); await wait(700);
   out.afterStop = a.world.lit.size;
-  a.startGame('dodge'); await wait(5200);
-  out.dodge = { phase: a.game.state(performance.now()).phase, bars: a.game.bars.length, screen: a.showLit?.size ?? 0, board: a.world.lit.size };
-  await a.stopGame(); await wait(700);
-  out.afterStop2 = a.world.lit.size;
+  a.setGameOpts({ hud: false });
+  a.startGame('coins'); await wait(3800);
+  out.coinsNoHud = { board: a.world.lit.size, coins: a.game.coins.length };
+  await a.stopGame(); await wait(500);
+  a.setGameOpts({ hud: true });
+  a.startGame('dodge'); await wait(6200);
+  out.dodge = { phase: a.game.state(performance.now()).phase, bars: a.game.bars.length, zones: a.showZones?.length ?? 0, screen: a.showLit?.size ?? 0, board: a.world.lit.size };
   return out;
 });
+await shot('06c-dodge-on-wall');
+games.afterStop2 = await page.evaluate(async () => { const a = window.__bv; await a.stopGame(); await new Promise((r) => setTimeout(r, 700)); return a.world.lit.size; });
 console.log('   games', JSON.stringify(games));
-check('coins game: running, coins lit on screen and board', games.coins.phase === 'running' && games.coins.coins === 2 && games.coins.screen === 2 && games.coins.board >= 1 && games.coins.board <= 2 && games.coins.hud);
-check('dodge game: bars lit on screen and board', games.dodge.phase === 'running' && games.dodge.bars >= 1 && games.dodge.screen >= 1 && games.dodge.board >= 1);
+check('game countdown is shown on the wall (one row of LEDs)', games.countdown.fx === 'countdown' && games.countdown.board >= 10 && games.countdown.board <= 30, JSON.stringify(games.countdown));
+check('coins game: coins plus the status strips on the wall', games.coins.phase === 'running' && games.coins.coins === 2 && games.coins.screen === 2 && games.coins.onWall && games.coins.hudOn && games.coins.board >= 10 && games.coins.board <= 64 && games.coins.dots >= games.coins.board - 2, JSON.stringify(games.coins));
+check('coins game without status strips: only the coins', games.coinsNoHud.board >= 1 && games.coinsNoHud.board <= 3, JSON.stringify(games.coinsNoHud));
+check('dodge game: bars on the wall (areas, not only holds), lives on the top edge', games.dodge.phase === 'running' && games.dodge.bars >= 1 && games.dodge.zones >= 1 && games.dodge.board >= 10 && games.dodge.board <= 64, JSON.stringify(games.dodge));
 check('stopping a game switches the board off', games.afterStop === 0 && games.afterStop2 === 0);
 await shot('06b-game');
 

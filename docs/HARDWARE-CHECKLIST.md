@@ -42,7 +42,9 @@ camera image* if the problem is about what the camera sees.
 
 ## Games (smoke test of the whole chain)
 
-Live -> *Game* -> **Coins**: two lit holds appear on screen and on the board; grab one with a hand: it flashes green and a
-new one appears. **Dodge**: a red bar falls; it must never light more than about half of the wall width. If hands/feet do not
-score, adjust *Feet/Hands: shift up* in the Live panel first.
-
+Live -> *Game* (needs a connected board and a finished LED scan). Start **Coins**: one row of LEDs shows the countdown
+(orange, yellow), flashes green at the start; then two coins light, the top row shows the time as a bar, the left column the
+combo, the bottom row the score. Grab a coin with a hand: it flashes green and a new one appears. **Dodge**: a dim bar appears
+at the top (warning), turns red and falls; every LED in it is red, also LEDs without a hold. Lives show as blocks in the top
+row. Check: nothing flickers, the bar moves smoothly, the game-over sweep runs top to bottom and the score stays on the bottom
+row until *Stop game*. If hands/feet do not score, adjust *Feet/Hands: shift up* in the Live panel first.

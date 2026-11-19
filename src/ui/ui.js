@@ -7,7 +7,7 @@ import { NUMBERING_MODES } from '../core/numbering.js';
 import { BleTransport } from '../board/aurora.js';
 import { SerialSink } from '../outputs/sinks.js';
 import { SHOWS, ROLES } from '../outputs/lightshow.js';
-import { GAMES } from '../game/games.js';
+import { GAMES, DIFFICULTIES } from '../game/games.js';
 
 const S = (sel) => useStore(store, sel);
 const STEPS = [
@@ -282,10 +282,14 @@ function LivePanel() {
       <label class="field"><span>Climber faces</span><select value=${l.facing} onChange=${(e) => app.setLive({ facing: e.target.value })}><option value="wall">The wall (camera behind)</option><option value="camera">The camera</option></select></label>
       <label class="check"><input type="checkbox" checked=${l.swapLR} onChange=${(e) => app.setLive({ swapLR: e.target.checked })} /><span>Swap left / right</span></label>
     <//>
-    <${Section} title="Game" hint="Little games for testing: they use the same hand and foot contacts. Holds light up on screen and, if connected, on the board.">
+    <${Section} title="Game" hint="Little games for testing: they use the same hand and foot contacts. Targets, obstacles, time, lives and score light up on the wall itself when the board is connected, and are mirrored on screen.">
       <label class="field"><span>Choose a game</span><select value=${st.game.id} disabled=${st.game.active} onChange=${(e) => app.selectGame(e.target.value)}>${GAMES.map((g) => html`<option value=${g.id}>${g.title}</option>`)}</select></label>
       <p class="hint">${GAMES.find((g) => g.id === st.game.id).blurb}</p>
+      <label class="field"><span>Difficulty</span><select value=${st.game.opts.difficulty} disabled=${st.game.active} onChange=${(e) => app.setGameOpts({ difficulty: e.target.value })}>${DIFFICULTIES.map((d) => html`<option value=${d.id}>${d.title}</option>`)}</select></label>
+      <label class="check"><input type="checkbox" checked=${st.game.opts.hud} disabled=${st.game.active} onChange=${(e) => app.setGameOpts({ hud: e.target.checked })} /><span>Show time, lives and score on the wall</span></label>
+      <p class="hint">Uses the top row (time / lives), the left column (combo / speed) and the bottom row (score) of the LEDs; the holds there are not part of the game.</p>
       ${st.game.active ? html`<${Btn} kind="danger wide" onClick=${() => app.stopGame()}>Stop game<//>` : html`<${Btn} kind="primary wide" disabled=${!l.running} onClick=${() => app.startGame()}>Start game<//>`}
+      ${st.game.active ? html`<p class="hint">${st.game.info.onWall ? `On the wall · ${st.game.info.playable} playable holds${st.game.info.hud ? ' · status on the edges' : ''}` : 'Screen only: connect the board and scan the LEDs to play on the wall.'}</p>` : !connected && html`<p class="hint">Board not connected: the game runs on screen only.</p>`}
       <p class="hint">Best: ${GAMES.map((g) => `${g.title} ${st.game.best[g.id] || 0}`).join(' · ')}</p>
     <//>
     ${st.kilter && html`<${Section} title="Board output">
@@ -363,7 +367,7 @@ function GameHud() {
   let line;
   if (st.phase === 'ready') line = html`<b>Get ready</b><span class="big">${st.countdown}</span>`;
   else if (g.id === 'coins') line = over ? html`<b>Time is up</b><span class="big">${st.score}</span><span>coins score · best ${best}</span>` : html`<b>Coins</b><span class="big">${st.score}</span><span>${st.combo > 1 ? `combo ×${st.combo}` : ''}</span><span>${mmss(st.secondsLeft)}</span>`;
-  else line = over ? html`<b>Game over</b><span class="big">${st.score} s</span><span>survived · best ${best} s</span>` : html`<b>Dodge</b><span class="big">${st.score} s</span><span class="hearts">${'♥'.repeat(st.lives)}${'♡'.repeat(Math.max(0, 3 - st.lives))}</span>`;
+  else line = over ? html`<b>Game over</b><span class="big">${st.score} s</span><span>survived · best ${best} s</span>` : html`<b>Dodge</b><span class="big">${st.score} s</span><span class="hearts">${'♥'.repeat(st.lives)}${'♡'.repeat(Math.max(0, st.maxLives - st.lives))}</span>`;
   return html`<div class=${`game-hud ${over ? 'over' : ''}`}>${line}${over && html`<span class="hud-btns"><button class="btn primary" onClick=${() => app.startGame()}>Play again</button><button class="btn" onClick=${() => app.stopGame()}>Close</button></span>`}</div>`;
 }
 

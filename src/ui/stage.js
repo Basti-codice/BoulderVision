@@ -182,6 +182,17 @@ export class Stage {
       }
       if (hit && hit.length) { const [cx, cy] = this.toScreen(v, h.cx, h.cy - Math.sqrt(h.area) * 0.8); ctx.font = '700 11px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = LIMB_COL[hit[0]]; ctx.strokeStyle = 'rgba(0,0,0,.8)'; ctx.lineWidth = 3; const t = hit.join('+'); ctx.strokeText(t, cx, cy); ctx.fillText(t, cx, cy); }
     }
+    // game: obstacle areas and the LEDs the wall shows (status strips, effects, areas without a hold)
+    if (app.showZones?.length) {
+      ctx.save();
+      for (const z of app.showZones) { const [x0, y0] = this.toScreen(v, z.x0, z.y0), [x1, y1] = this.toScreen(v, z.x1, z.y1); ctx.fillStyle = `rgba(${z.color.r},${z.color.g},${z.color.b},.22)`; ctx.fillRect(x0, y0, x1 - x0, y1 - y0); ctx.strokeStyle = `rgba(${z.color.r},${z.color.g},${z.color.b},.7)`; ctx.lineWidth = 1.5; ctx.strokeRect(x0, y0, x1 - x0, y1 - y0); }
+      ctx.restore();
+    }
+    if (app.showLeds?.length) {
+      ctx.save();
+      for (const l of app.showLeds) { const [x, y] = this.toScreen(v, l.x, l.y); ctx.beginPath(); ctx.arc(x, y, 5, 0, 7); ctx.fillStyle = `rgb(${l.r},${l.g},${l.b})`; ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 8; ctx.fill(); }
+      ctx.restore();
+    }
     // light show preview (what the board is showing) and route roles
     const lit = app.showLit, route = s.mode === 'setup' && s.step === 'board' ? app.activeRoute : null;
     if (lit?.size || route) {

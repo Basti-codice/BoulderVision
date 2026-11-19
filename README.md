@@ -61,9 +61,17 @@ Run the Holds step first: the scan assigns LEDs to detected holds.
 ## Games (Live mode)
 
 Two small games for testing the whole chain (camera, contacts, board): **Coins** (grab lit coin holds with your hands, quick
-grabs build a combo, golden coins every fifth, 60 s) and **Dodge** (red bars fall from the top, never cover more than 55 % of the
-width, speed grows; touching a red hold with any limb costs a life). Holds light on screen and, if a board is connected, on
-the board. The rules live in `src/game/games.js` (pure, seeded, unit tested).
+grabs build a combo, golden coins every fifth, 60 s) and **Dodge** (red bars fall from the top, announced by a dim warning,
+never cover more than the difficulty's share of the width, speed grows; staying on a red hold costs a life after a short grace
+time, then a shield). Difficulty: easy / medium / hard.
+
+Everything is shown **on the wall**, not only on screen (the screen is mirrored): targets, the bars (every LED inside a bar
+lights, with or without a hold), a countdown (one row of LEDs, red / orange / yellow, then a green flash), and a game-over
+sweep. Optional status strips (setting *Show time, lives and score on the wall*): top row = time bar (Coins) / lives (Dodge),
+left column = combo (Coins) / speed (Dodge), bottom row = score ticks (one LED per point, a second lap changes colour). The holds
+on those strips are not part of the game. Only holds that have an LED are played, so no target or trap is ever invisible. A frame
+lights at most 64 LEDs (one Bluetooth message, safe current). Without a connected board the game runs on screen only.
+The rules live in `src/game/games.js`, the wall rendering in `src/game/wallhud.js` (both pure, unit tested).
 
 ## Debug report
 
