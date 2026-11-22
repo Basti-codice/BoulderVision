@@ -1,28 +1,21 @@
 import { html, render } from 'htm/preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import { app, store } from '../app/controller.js';
-import { useStore } from '../store/store.js';
+import { S, Section, Btn, Slider, Seg } from './kit.js';
+import { ResponseMenu } from './response.js';
+import { GamesPanel, GamesRight, GameHud } from './games.js';
+import { isLiveMode } from '../app/modes.js';
 import { Stage, LIMB_COL } from './stage.js';
 import { NUMBERING_MODES } from '../core/numbering.js';
 import { BleTransport } from '../board/aurora.js';
 import { SerialSink } from '../outputs/sinks.js';
 import { SHOWS, ROLES } from '../outputs/lightshow.js';
-import { GAMES, DIFFICULTIES } from '../game/games.js';
 
-const S = (sel) => useStore(store, sel);
 const STEPS = [
   { id: 'camera', label: 'Camera' }, { id: 'align', label: 'Align' }, { id: 'holds', label: 'Holds' },
   { id: 'board', label: 'Board', kilter: true }, { id: 'ready', label: 'Go live' },
 ];
 
-// ---------- small building blocks ----------
-const Section = ({ title, hint, children, right }) => html`<section class="sec"><div class="sec-h"><h3>${title}</h3>${right}</div>${hint && html`<p class="hint">${hint}</p>`}${children}</section>`;
-const Btn = ({ children, kind = '', ...p }) => html`<button class=${`btn ${kind}`} ...${p}>${children}</button>`;
-const Slider = ({ label, value, min, max, step = 1, onInput, fmt = (v) => v, lo, hi, disabled }) => html`
-  <label class=${`slider ${disabled ? 'off' : ''}`}><div class="sl-top"><span>${label}</span><b>${fmt(value)}</b></div>
-  <input type="range" min=${min} max=${max} step=${step} value=${value} disabled=${disabled} onInput=${(e) => onInput(+e.target.value)} />
-  ${(lo || hi) && html`<div class="sl-ends"><span>${lo}</span><span>${hi}</span></div>`}</label>`;
-const Seg = ({ options, value, onChange }) => html`<div class="seg">${options.map((o) => html`<button class=${value === o.id ? 'on' : ''} onClick=${() => onChange(o.id)} title=${o.title || ''}>${o.label}</button>`)}</div>`;
 /** Text/number field that keeps what you type; the value is applied on Enter or when the field loses focus. */
 function EditField({ value, onCommit, type = 'text', ...rest }) {
   const [text, setText] = useState(String(value ?? ''));
@@ -42,7 +35,7 @@ function Header() {
   const camState = cam.status === 'on' ? 'ok' : cam.status === 'starting' ? 'warn' : cam.status === 'error' ? 'bad' : 'off';
   const boardState = b.state === 'connected' ? 'ok' : b.state === 'connecting' ? 'warn' : 'off';
   const poseState = live.running ? 'ok' : live.loading ? 'warn' : 'off';
-  const badge = st.mode === 'live' ? (live.running ? 'LIVE' : 'REVIEW') : st.step === 'holds' ? 'EDIT' : 'SETUP';
+  const badge = isLiveMode(st) ? (live.running ? (st.mode === 'games' ? 'GAMES' : 'LIVE') : 'REVIEW') : st.step === 'holds' ? 'EDIT' : 'SETUP';
   return html`<header class="top">
     <div class="brand"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M3 20 L10 7 L14 14 L17 9 L21 20 Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span>BoulderVision</span></div>
     <${ProfileMenu} />
@@ -53,8 +46,8 @@ function Header() {
       <${Chip} state=${poseState} label="Pose" detail=${live.running ? `${live.activeVariant} · ${live.fps} fps · ${live.latency} ms` : live.loading ? 'loading…' : ''} />
       ${st.kilter && html`<${Chip} state=${boardState} label="Board" detail=${b.state === 'connected' ? b.name : ''} />`}
     </div>
-    <div class=${`badge ${badge.toLowerCase()}`}>${badge === 'LIVE' && html`<i></i>`}${badge}</div>
-    <div class="tabs"><button class=${st.mode === 'setup' ? 'on' : ''} onClick=${() => app.leaveLive()}>Setup</button><button class=${st.mode === 'live' ? 'on' : ''} onClick=${() => (st.mode === 'live' ? null : app.startLive())}>Live</button></div>
+    <div class=${`badge ${badge.toLowerCase()}`}>${(badge === 'LIVE' || badge === 'GAMES') && html`<i></i>`}${badge}</div>
+    <div class="tabs"><button class=${st.mode === 'setup' ? 'on' : ''} onClick=${() => app.leaveLive()}>Setup</button><button class=${st.mode === 'live' ? 'on' : ''} onClick=${() => app.openLive()}>Live</button><button class=${st.mode === 'games' ? 'on' : ''} onClick=${() => app.openGames()}>Games</button></div>
   </header>`;
 }
 
@@ -274,6 +267,7 @@ function LivePanel() {
     <${Section} title="Tracking">
       <label class="field"><span>Pose model</span><select value=${l.variant} onChange=${(e) => app.setVariant(e.target.value)} disabled=${st.demo}><option value="auto">Auto (best that runs smoothly)</option><option value="heavy">Heavy · most accurate</option><option value="full">Full · balanced</option><option value="lite">Lite · fastest</option></select></label>
       ${l.running && html`<p class="hint">Running: ${l.activeVariant} (${l.delegate}) · ${l.fps} fps · ${l.latency} ms per frame</p>`}
+      <${ResponseMenu} />
       <${Slider} label="Contact tolerance" value=${l.tolCm} min=${0.5} max=${6} step=${0.5} fmt=${(v) => `${v} cm`} lo="strict" hi="forgiving" onInput=${(v) => app.setLive({ tolCm: v })} />
       <${Slider} label="Feet: shift up" value=${l.footUp} min=${-30} max=${40} step=${1} fmt=${(v) => `${v > 0 ? '+' : ''}${v} cm`} lo="lower" hi="higher" onInput=${(v) => app.setLive({ footUp: v })} />
       <${Slider} label="Hands: shift up" value=${l.handUp} min=${-30} max=${40} step=${1} fmt=${(v) => `${v > 0 ? '+' : ''}${v} cm`} onInput=${(v) => app.setLive({ handUp: v })} />
@@ -281,16 +275,6 @@ function LivePanel() {
       <p class="hint">If hands or feet light the wrong hold: adjust while the climber holds still on a known hold. Raise the perspective correction when the camera is close to the wall and the error grows towards the edges.</p>
       <label class="field"><span>Climber faces</span><select value=${l.facing} onChange=${(e) => app.setLive({ facing: e.target.value })}><option value="wall">The wall (camera behind)</option><option value="camera">The camera</option></select></label>
       <label class="check"><input type="checkbox" checked=${l.swapLR} onChange=${(e) => app.setLive({ swapLR: e.target.checked })} /><span>Swap left / right</span></label>
-    <//>
-    <${Section} title="Game" hint="Little games for testing: they use the same hand and foot contacts. Targets, obstacles, time, lives and score light up on the wall itself when the board is connected, and are mirrored on screen.">
-      <label class="field"><span>Choose a game</span><select value=${st.game.id} disabled=${st.game.active} onChange=${(e) => app.selectGame(e.target.value)}>${GAMES.map((g) => html`<option value=${g.id}>${g.title}</option>`)}</select></label>
-      <p class="hint">${GAMES.find((g) => g.id === st.game.id).blurb}</p>
-      <label class="field"><span>Difficulty</span><select value=${st.game.opts.difficulty} disabled=${st.game.active} onChange=${(e) => app.setGameOpts({ difficulty: e.target.value })}>${DIFFICULTIES.map((d) => html`<option value=${d.id}>${d.title}</option>`)}</select></label>
-      <label class="check"><input type="checkbox" checked=${st.game.opts.hud} disabled=${st.game.active} onChange=${(e) => app.setGameOpts({ hud: e.target.checked })} /><span>Show time, lives and score on the wall</span></label>
-      <p class="hint">Uses the top row (time / lives), the left column (combo / speed) and the bottom row (score) of the LEDs; the holds there are not part of the game.</p>
-      ${st.game.active ? html`<${Btn} kind="danger wide" onClick=${() => app.stopGame()}>Stop game<//>` : html`<${Btn} kind="primary wide" disabled=${!l.running} onClick=${() => app.startGame()}>Start game<//>`}
-      ${st.game.active ? html`<p class="hint">${st.game.info.onWall ? `On the wall · ${st.game.info.playable} playable holds${st.game.info.hud ? ' · status on the edges' : ''}` : 'Screen only: connect the board and scan the LEDs to play on the wall.'}</p>` : !connected && html`<p class="hint">Board not connected: the game runs on screen only.</p>`}
-      <p class="hint">Best: ${GAMES.map((g) => `${g.title} ${st.game.best[g.id] || 0}`).join(' · ')}</p>
     <//>
     ${st.kilter && html`<${Section} title="Board output">
       <label class="check"><input type="checkbox" checked=${l.lightBoard} disabled=${!connected} onChange=${(e) => app.setLive({ lightBoard: e.target.checked })} /><span>Light the holds hands and feet are on</span></label>
@@ -347,7 +331,7 @@ function StageView() {
   const st = S((s) => s);
   useEffect(() => { const sg = new Stage(ref.current, app, store); stageRef.current = sg; window.__stage = sg; return () => sg.destroy(); }, []);
   const none = !st.cam.status || st.cam.status === 'off';
-  const live = st.mode === 'live' && st.live.running;
+  const live = isLiveMode(st) && st.live.running;
   const hints = { camera: 'Choose a camera source on the left.', align: 'Drag the corner handles onto the wall corners.', holds: '', board: 'Click a hold to light its LED.', ready: '' };
   return html`<main class=${`stage ${live ? 'is-live' : ''}`}>
     <div class="canvas-host" ref=${ref}></div>
@@ -358,17 +342,6 @@ function StageView() {
     ${live && html`<div class="live-pill"><i></i>LIVE</div>`}
     <${GameHud} />
   </main>`;
-}
-
-function GameHud() {
-  const g = S((s) => s.game);
-  if (!g.active || !g.state) return null;
-  const st = g.state, best = g.best[g.id] || 0, over = st.phase === 'over', mmss = (sec) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
-  let line;
-  if (st.phase === 'ready') line = html`<b>Get ready</b><span class="big">${st.countdown}</span>`;
-  else if (g.id === 'coins') line = over ? html`<b>Time is up</b><span class="big">${st.score}</span><span>coins score · best ${best}</span>` : html`<b>Coins</b><span class="big">${st.score}</span><span>${st.combo > 1 ? `combo ×${st.combo}` : ''}</span><span>${mmss(st.secondsLeft)}</span>`;
-  else line = over ? html`<b>Game over</b><span class="big">${st.score} s</span><span>survived · best ${best} s</span>` : html`<b>Dodge</b><span class="big">${st.score} s</span><span class="hearts">${'♥'.repeat(st.lives)}${'♡'.repeat(Math.max(0, st.maxLives - st.lives))}</span>`;
-  return html`<div class=${`game-hud ${over ? 'over' : ''}`}>${line}${over && html`<span class="hud-btns"><button class="btn primary" onClick=${() => app.startGame()}>Play again</button><button class="btn" onClick=${() => app.stopGame()}>Close</button></span>`}</div>`;
 }
 
 function Toast() {
@@ -397,9 +370,9 @@ export function Root() {
   return html`<div class="app">
     <${Header} />
     <div class="main">
-      <aside class="panel left">${st.mode === 'live' ? html`<${LivePanel} />` : html`<${Stepper} /><${Step} />`}<${Diagnostics} /></aside>
+      <aside class="panel left">${st.mode === 'live' ? html`<${LivePanel} />` : st.mode === 'games' ? html`<${GamesPanel} />` : html`<${Stepper} /><${Step} />`}<${Diagnostics} /></aside>
       <${StageView} />
-      <aside class="panel right">${st.mode === 'live' ? html`<${LiveRight} />` : html`<${Inspector} />`}</aside>
+      <aside class="panel right">${st.mode === 'live' ? html`<${LiveRight} />` : st.mode === 'games' ? html`<${GamesRight} />` : html`<${Inspector} />`}</aside>
     </div>
     <${Toast} />
   </div>`;

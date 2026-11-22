@@ -1,4 +1,5 @@
 // The centre stage: camera view or straightened wall, overlays, and all pointer interaction.
+import { isLiveMode } from '../app/modes.js';
 import { Warper } from '../core/warp.js';
 import { applyH, invert3, pointInPolygon } from '../core/geometry.js';
 import { SKELETON } from '../pose/pose.js';
@@ -151,13 +152,13 @@ export class Stage {
   contactMap(s) {
     const map = new Map();
     const add = (limb, id) => { if (id == null) return; (map.get(id) || map.set(id, []).get(id)).push(limb); };
-    if (s.mode === 'live' && s.live.running && this.app.liveDraw) for (const [l, id] of Object.entries(this.app.liveDraw.contacts)) add(l, id);
-    else if (s.mode === 'live' && s.session.replayT != null) for (const [l, e] of Object.entries(this.app.replayContacts() || {})) add(l, e?.holdId);
+    if (isLiveMode(s) && s.live.running && this.app.liveDraw) for (const [l, id] of Object.entries(this.app.liveDraw.contacts)) add(l, id);
+    else if (isLiveMode(s) && s.session.replayT != null) for (const [l, e] of Object.entries(this.app.replayContacts() || {})) add(l, e?.holdId);
     return map;
   }
 
   drawWallOverlay(ctx, v, s) {
-    const app = this.app, holds = app.holds, live = s.mode === 'live', contacts = this.contactMap(s), tool = s.tool;
+    const app = this.app, holds = app.holds, live = isLiveMode(s), contacts = this.contactMap(s), tool = s.tool;
     const editing = s.mode === 'setup' && s.step === 'holds';
     for (const h of holds) {
       const hit = contacts.get(h.id), sel = editing && s.selected === h.id, hov = editing && this.hover === h.id && !this.drag;

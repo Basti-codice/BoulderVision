@@ -4,6 +4,7 @@
 // A game sees the playable holds (wall pixels), the current contacts per limb ({LH,RH,LF,RF} -> hold id | null) and the
 // time. update(now, contacts) advances it; output(now) says what to show:
 //   lit    Map holdId -> {r,g,b}      target holds / flashes (also drawn on screen)
+//   flash  Map holdId -> {r,g,b}      the short feedback inside lit (a hit, a collected coin): it stays visible under a hand
 //   zones  [{x0,y0,x1,y1,color}]      areas in wall px; every LED inside lights, bound to a hold or not (obstacles)
 //   hud    {top, left, bottom}        status strips for the wall (see wallhud.js)
 //   fx     {kind: 'countdown'|'go'|'sweep', ...} | null
@@ -27,10 +28,22 @@ export const COLORS = {
   record: { r: 0, g: 255, b: 0 },
 };
 
+/**
+ * The games on offer. A game is a class below with start / update / output / state; this list is what the Games area
+ * shows. unit: how the score is written (and what "best" means); options: which settings the game uses (see OPTIONS).
+ */
 export const GAMES = [
-  { id: 'coins', title: 'Coins', blurb: 'Grab the lit coin holds with your hands. Quick grabs build a combo (up to x3). 60 seconds.' },
-  { id: 'dodge', title: 'Dodge', blurb: 'Red bars fall from the top, announced by a dim warning. Do not stay on a red hold. Lives are shown at the top edge; it gets faster.' },
+  { id: 'coins', title: 'Coins', unit: 'points', options: ['difficulty'], blurb: 'Grab the lit coin holds with your hands. Quick grabs build a combo (up to x3). 60 seconds.' },
+  { id: 'dodge', title: 'Dodge', unit: 'seconds', options: ['difficulty'], blurb: 'Red bars fall from the top, announced by a dim warning. Do not stay on a red hold. Lives are shown at the top edge; it gets faster.' },
 ];
+/** Settings a game can ask for (GAMES[].options); the Games area draws them. */
+export const OPTIONS = {
+  difficulty: { id: 'difficulty', label: 'Difficulty', choices: [{ id: 'easy', title: 'Easy' }, { id: 'medium', title: 'Medium' }, { id: 'hard', title: 'Hard' }] },
+};
+/** Records are kept per game and difficulty. */
+export const recordKey = (id, difficulty = 'medium') => `${id}:${difficulty}`;
+/** "12 points" / "47 s" */
+export const formatScore = (id, value) => { const g = GAMES.find((x) => x.id === id); return g?.unit === 'seconds' ? `${value} s` : `${value}`; };
 
 export const DIFFICULTIES = [
   { id: 'easy', title: 'Easy' },
@@ -175,6 +188,13 @@ export class CoinGame extends Game {
     this.remember(contacts);
   }
 
+  /** Short feedback that must stay visible even under a hand: a collected coin flashes green. */
+  get flashLit() {
+    const m = new Map();
+    if (this.phase === 'running') for (const f of this.flashes) m.set(f.holdId, COLORS.collected);
+    return m;
+  }
+
   get lit() {
     const m = new Map();
     if (this.phase !== 'running') return m;
@@ -192,6 +212,7 @@ export class CoinGame extends Game {
     const frac = this._left(now) / this.cfg.duration;
     return {
       lit: this.lit,
+      flash: this.flashLit,
       zones: [],
       hud: {
         top: { kind: 'bar', value: frac, color: frac > 0.5 ? COLORS.time : frac > 0.2 ? COLORS.timeLow : COLORS.danger },
@@ -287,6 +308,12 @@ export class DodgeGame extends Game {
     this.remember(contacts);
   }
 
+  get flashLit() {
+    const m = new Map();
+    if (this.phase === 'running') for (const f of this.flashes) m.set(f.holdId, COLORS.hit);
+    return m;
+  }
+
   get lit() {
     const m = new Map();
     if (this.phase !== 'running') return m;
@@ -306,6 +333,7 @@ export class DodgeGame extends Game {
   output(now) {
     return {
       lit: this.lit,
+      flash: this.flashLit,
       zones: this.zones,
       hud: {
         top: { kind: 'segments', count: this.cfg.lives, lit: this.lives, color: COLORS.danger },

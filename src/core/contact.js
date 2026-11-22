@@ -78,7 +78,7 @@ export class ContactTracker {
       const n = this.nearest(pts);
       if (!n || n.dist > tol || speed > maxSpeedCmS) { st.cand = null; continue; }
       if (st.cand !== n.hold.id) { st.cand = n.hold.id; st.candSince = t; }
-      if (t - st.candSince >= onMs) { st.hold = n.hold.id; st.cand = null; events.push({ t, limb, hold: st.hold, on: true }); }
+      if (t - st.candSince >= onMs) { events.push({ t, limb, hold: n.hold.id, on: true, since: st.candSince }); st.hold = n.hold.id; st.cand = null; } // since: when it first hovered over the hold (for the latency stats)
     }
     return events;
   }

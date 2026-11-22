@@ -140,3 +140,16 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .game-hud.over { border-color: var(--accent); }
 .hud-btns { display: flex; gap: 8px; margin-left: 10px; align-self: center; }
 .check.off { opacity: .45; }
+
+/* games area */
+.game-list { display: grid; gap: 8px; margin-top: 6px; }
+.game-card { display: grid; gap: 4px; text-align: left; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line2); background: var(--panel2, #11161d); color: var(--text); cursor: pointer; font: inherit; }
+.game-card b { font-size: 14px; }
+.game-card span { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.game-card em { color: var(--accent); font-style: normal; font-size: 12px; font-family: var(--mono); }
+.game-card.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.game-card:disabled { opacity: .55; cursor: default; }
+.rec-game { padding: 4px 0 8px; }
+.rec-game > b { display: block; margin-bottom: 4px; }
+.response { margin: 10px 0 4px; }
+.badge.games { color: var(--accent); }

@@ -131,8 +131,10 @@ const inZone = (l, z) => l.x >= z.x0 && l.x <= z.x1 && l.y >= z.y0 && l.y <= z.y
 /**
  * One frame.
  * @param {object|null} layout from buildLayout (null: no LED map, only the target LEDs below)
- * @param {{holdLeds?: {pos:number, color:{r,g,b}}[], zones?: {x0,y0,x1,y1,color}[], hud?: {top?,left?,bottom?}, fx?: object}} parts
- *   holdLeds: the LEDs of target holds (highest priority). zones: rectangles in wall px; every LED inside lights, whether
+ * @param {{flashLeds?, limbLeds?, holdLeds?: {pos:number, color:{r,g,b}}[], zones?: {x0,y0,x1,y1,color}[], hud?: {top?,left?,bottom?}, fx?: object}} parts
+ *   Priority, highest first: fx (replaces everything), flashLeds (a hit / a collected coin, short), limbLeds (the holds hands and
+ *   feet are on, so nobody can claim the system saw something else), holdLeds (targets), zones, hud.
+ *   zones: rectangles in wall px; every LED inside lights, whether
  *   a hold sits there or not (earlier zones win). hud: strip specs (bar / segments / ticks / count). fx: countdown / go / sweep.
  * @param {{hudOn?: boolean, cap?: number}} [o]
  * @returns {{pos:number, r:number, g:number, b:number}[]}
@@ -142,7 +144,7 @@ export function composeWall(layout, parts, { hudOn = true, cap = MAX_GAME_LEDS }
   const put = (pos, c) => { if (pos != null && !out.has(pos) && out.size < cap) out.set(pos, c); };
   const useHud = hudOn && !!layout?.hud;
   if (layout && drawEffect(layout, parts.fx, put)) return [...out].map(([pos, c]) => ({ pos, r: c.r, g: c.g, b: c.b }));
-  for (const t of parts.holdLeds || []) put(t.pos, t.color);
+  for (const t of [...(parts.flashLeds || []), ...(parts.limbLeds || []), ...(parts.holdLeds || [])]) put(t.pos, t.color);
   if (layout) for (const z of parts.zones || []) for (const l of layout.leds) if (!(useHud && layout.hudPos.has(l.pos)) && inZone(l, z)) put(l.pos, z.color);
   if (useHud && parts.hud) {
     drawStrip(layout.top, parts.hud.top, put);

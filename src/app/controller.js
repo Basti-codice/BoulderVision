@@ -5,6 +5,8 @@ import { Warper, warpCPU } from '../core/warp.js';
 import { wallSize } from '../core/wall.js';
 import { intersectionArea, resolveOverlaps, wallHomography, invert3, applyH, solveHomography, isValidQuad, pointInPolygon, polygonDistance, ellipsePolygon, polygonCentroid, polygonArea, orderCorners } from '../core/geometry.js';
 import { OneEuro2D } from '../core/filters.js';
+import { LatencyMeter } from '../core/latency.js';
+import { sanitize as sanitizeContact, withPreset as contactPreset, withValue as contactValue, resolve as resolveContact } from '../core/responsiveness.js';
 import { bindLeds } from '../core/binding.js';
 import { ContactTracker, LIMBS } from '../core/contact.js';
 import { numberHolds } from '../core/numbering.js';
@@ -16,8 +18,8 @@ import { PoseEngine, SKELETON, pickClimber, limbPoints, limbQuality, SideGuard, 
 import { Bus, WebSocketSink, SerialSink, KilterSink, SessionRecorder, download, downloadBlob } from '../outputs/sinks.js';
 import { showFrame, ROLES } from '../outputs/lightshow.js';
 import { debugLog } from '../core/debuglog.js';
-import { createGame } from '../game/games.js';
-import { buildLayout, composeWall, isReserved } from '../game/wallhud.js';
+import { GamesController } from './gamesController.js';
+import { isLiveMode } from './modes.js';
 import { rng } from '../core/rng.js';
 import pkg from '../../package.json';
 import { DemoWorld, DemoPose } from '../sim/demo.js';
@@ -27,10 +29,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clone = (o) => structuredClone(o);
 const SETTINGS_KEY = 'bv.settings';
 const MAX_SHOW_LEDS = 36;
-const BEST_KEY = 'bv.game.best';
-const GAME_OPTS_KEY = 'bv.game.opts';
 const MAX_PROBE_FRAMES = 40;       // per probing round: unusual boards must not turn the scan into an endless search
-const GAME_UI_INTERVAL_MS = 200;   // HUD refresh rate
 const GAME_LED_INTERVAL_MS = 120;  // minimum time between LED frames (Bluetooth is slow)
 
 export const store = createStore({
@@ -41,11 +40,11 @@ export const store = createStore({
   holds: [], tool: 'select', selected: null, numbering: 'rows', numberStart: 1, canUndo: false, canRedo: false,
   detect: { sensitivity: 0.5, contrast: 0.25, minDia: 0, maxDia: 30, showUncertain: false, effMin: 0, busy: false, hasAnalysis: false, message: '' },
   board: { state: 'idle', name: '', ledCount: 1024, leds: [], rejected: 0, testing: null, scan: { running: false, progress: 0, message: '', result: null, verify: null }, align: { running: false, message: '' } },
-  live: { footUp: 0, handUp: 0, parallax: 0, running: false, loading: false, variant: 'auto', activeVariant: '', delegate: '', fps: 0, latency: 0, person: false, contacts: { LH: null, RH: null, LF: null, RF: null }, tolCm: 2.5, facing: 'wall', swapLR: false, lightBoard: false, error: '' },
+  live: { footUp: 0, handUp: 0, parallax: 0, contact: sanitizeContact({}), timing: null, running: false, loading: false, variant: 'auto', activeVariant: '', delegate: '', fps: 0, latency: 0, person: false, contacts: { LH: null, RH: null, LF: null, RF: null }, tolCm: 2.5, facing: 'wall', swapLR: false, lightBoard: false, error: '' },
   outputs: { ws: { url: 'ws://localhost:8765', state: 'off', detail: '' }, serial: { state: 'off', detail: '' } },
   session: { recording: false, events: 0, duration: 0, replayT: null, playing: false, summary: null },
   toast: null, ui: { labels: true, grid: true },
-  game: { id: 'coins', active: false, state: null, best: { coins: 0, dodge: 0 }, opts: { difficulty: 'medium', hud: true }, info: { onWall: false, hud: false, playable: 0 } },
+  game: { id: 'coins', current: null, active: false, state: null, best: {}, opts: { difficulty: 'medium', hud: true }, info: { onWall: false, hud: false, playable: 0 } },
   kilterTab: 'test', show: { running: false, pattern: 'rainbow', speed: 1 }, routes: { items: [], active: null, brush: 'hand', sync: true },
 });
 
@@ -66,7 +65,8 @@ class App {
     this.ws = new WebSocketSink((state, detail = '') => this.set({ outputs: { ...this.s.outputs, ws: { ...this.s.outputs.ws, state, detail } } }));
     this.serial = new SerialSink((state, detail = '') => this.set({ outputs: { ...this.s.outputs, serial: { state, detail } } }));
     this.bus.on((m) => { this.recorder.handle(m); this.ws.handle(m); this.serial.handle(m); this.kilterSink?.handle(m); });
-    this.showLit = null; this.showZones = null; this.showLeds = null; this._gameLayout = null; this._gameHud = false; this.game = null; this._ledSig = null; this._ledNext = null; this._ledBusy = false; this._gameUi = 0; this._gameLed = 0;
+    this.meter = new LatencyMeter(); this._lastStepAt = 0; this._timingAt = 0; this._filterOpts = resolveContact(this.s.live.contact).filter;
+    this.showLit = null; this.showZones = null; this.showLeds = null; this.game = null; this.games = new GamesController(this); this._ledSig = null; this._ledNext = null; this._ledBusy = false;
     this.source.addEventListener('change', () => this._camChanged());
     this._lastUi = 0;
   }
@@ -82,10 +82,10 @@ class App {
     const st = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     this.set({
       cam: { ...this.s.cam, res: st.res || 1080, deviceId: st.deviceId || '' },
-      live: { ...this.s.live, tolCm: st.tolCm ?? 2.5, facing: st.facing || 'wall', variant: st.variant || 'auto', footUp: st.footUp ?? 0, handUp: st.handUp ?? 0, parallax: st.parallax ?? 0 },
+      live: { ...this.s.live, tolCm: st.tolCm ?? 2.5, facing: st.facing || 'wall', variant: st.variant || 'auto', footUp: st.footUp ?? 0, handUp: st.handUp ?? 0, parallax: st.parallax ?? 0, contact: sanitizeContact(st.contact) },
       outputs: { ...this.s.outputs, ws: { ...this.s.outputs.ws, url: st.wsUrl || this.s.outputs.ws.url } },
     });
-    try { this.set({ game: { ...this.s.game, best: { ...this.s.game.best, ...JSON.parse(localStorage.getItem(BEST_KEY) || '{}') }, opts: { ...this.s.game.opts, ...JSON.parse(localStorage.getItem(GAME_OPTS_KEY) || '{}') } } }); } catch { /* ignore corrupt storage */ }
+    this.games.load();
     try { this.set({ profiles: await profiles.listProfiles() }); } catch (e) { console.warn('profiles unavailable', e); }
     const last = localStorage.getItem('bv.lastProfile');
     if (last && this.s.profiles.some((p) => p.id === last)) await this.loadProfile(last); else await this.newProfile('My wall', false);
@@ -96,15 +96,15 @@ class App {
   }
   saveSettings() {
     const { cam, live, outputs } = this.s;
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ res: cam.res, deviceId: cam.deviceId, tolCm: live.tolCm, facing: live.facing, variant: live.variant, footUp: live.footUp, handUp: live.handUp, parallax: live.parallax, wsUrl: outputs.ws.url }));
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ res: cam.res, deviceId: cam.deviceId, tolCm: live.tolCm, facing: live.facing, variant: live.variant, footUp: live.footUp, handUp: live.handUp, parallax: live.parallax, contact: live.contact, wsUrl: outputs.ws.url }));
   }
 
   // ---------- main loop ----------
   frame(now) {
     const fresh = this.source.tick(now);
     if (this.s.show.running) this._showTick(now);
-    if (this.game) this._gameTick(now);
-    if (fresh && this.s.mode === 'live' && this.s.live.running && this.engine && !this.poseBusy) this._liveStep(now);
+    if (this.game) this.games.tick(now);
+    if (fresh && this.tracking && this.engine && !this.poseBusy) this._liveStep(now);
   }
 
   // ---------- geometry ----------
@@ -485,9 +485,9 @@ class App {
     this.board.addEventListener('status', (e) => {
       this.log('board', { state: e.detail.state, name: e.detail.name, detail: e.detail.detail });
       this.set({ board: { ...this.s.board, state: e.detail.state, name: e.detail.name } });
-      if (e.detail.state === 'disconnected' && this.s.mode === 'live' && this.s.live.running && !this._reconnecting && !this._manualDisc) this._autoReconnect();
+      if (e.detail.state === 'disconnected' && this.tracking && !this._reconnecting && !this._manualDisc) this._autoReconnect();
     });
-    this.kilterSink = new KilterSink(this.board, (e) => this.toast(`Board: ${e.message}`, 'error'));
+    this.kilterSink = new KilterSink(this.board, (e) => this.toast(`Board: ${e.message}`, 'error'), (t) => { this.meter.add('led', t.total); this.meter.add('ledWrite', t.write); });
     this.kilterSink.enabled = this.s.live.lightBoard;
     this.board.setKnownPositions(this.s.board.leds.map((l) => l.pos));
   }
@@ -730,7 +730,10 @@ class App {
   }
 
   // ---------- live ----------
-  async startLive() {
+  /** Tracking is running in live or games mode. */
+  get tracking() { return isLiveMode(this.s) && this.s.live.running; }
+  /** @param {'live'|'games'} [mode] which view to open while tracking */
+  async startLive(mode = 'live') {
     if (this.s.live.loading || this.s.live.running) return;
     const token = ++this._liveToken;
     if (this.s.show.running) await this.stopShow();
@@ -738,7 +741,7 @@ class App {
     if (!this.Himg2wall) { this.toast('Mark the wall corners first.', 'error'); return; }
     if (!this.holds.some((h) => !h.ghost)) { this.toast('Detect holds first.', 'error'); return; }
     const l = this.s.live;
-    this.set({ mode: 'live', live: { ...l, loading: true, running: false, error: '' } });
+    this.set({ mode, live: { ...l, loading: true, running: false, error: '' } });
     try {
       if (this.s.demo) { this.engine = new DemoPose(this.world); this.world.climber = true; this.world.t0 = null; }
       else {
@@ -747,7 +750,9 @@ class App {
       }
       if (token !== this._liveToken) return; // stopped while the model was loading
       this.engine.ensureProbe?.(); // stateless landmarker used while searching for the climber
-      this.tracker = new ContactTracker(this.holds.filter((h) => !h.ghost), this.pxPerCm, { tolCm: l.tolCm });
+      const rc = resolveContact(l.contact);
+      this.tracker = new ContactTracker(this.holds.filter((h) => !h.ghost), this.pxPerCm, { tolCm: l.tolCm, ...rc.tracker });
+      this._filterOpts = rc.filter; this.meter.reset(); this._lastStepAt = 0;
       this.filters.clear(); this.prevPerson = null; this.track = null; this._lost = 99; this._tile = -1; this._rot = 0; this._lowq = 0; this.sideGuard = new SideGuard(); this._lat = 0; this._slow = 0;
       this.recorder.start(performance.now());
       this.log('live', { start: true, variant: this.engine.variant, delegate: this.engine.delegate, holds: this.holds.length });
@@ -773,6 +778,16 @@ class App {
     try { await this.kilterSink?.setEnabled(false); } catch { /* ignore */ }
   }
   leaveLive() { this.stopLive(); this.set({ mode: 'setup' }); }
+  /** Games area: starts tracking when needed (the games use the hand and foot contacts). */
+  openGames() {
+    if (this.s.mode === 'games') return;
+    if (this.s.live.running) this.set({ mode: 'games' }); else this.startLive('games');
+  }
+  /** Live view; a running game is stopped, tracking continues. */
+  openLive() {
+    if (this.s.mode === 'live') return;
+    if (this.s.mode === 'games') { this.stopGame(); this.set({ mode: 'live' }); } else this.startLive('live');
+  }
 
   async setVariant(v) {
     this.set({ live: { ...this.s.live, variant: v } }); this.saveSettings();
@@ -781,6 +796,17 @@ class App {
       try { await this.engine.load(v === 'auto' ? 'heavy' : v); this.set({ live: { ...this.s.live, loading: false, activeVariant: this.engine.variant, delegate: this.engine.delegate } }); }
       catch (e) { this.set({ live: { ...this.s.live, loading: false } }); this.toast(e.message, 'error'); }
     }
+  }
+  /** Responsiveness menu: a preset, or one number (which makes the settings "custom"). Applies at once, also while tracking. */
+  setContact(change) {
+    const cur = this.s.live.contact;
+    const contact = change.preset !== undefined ? contactPreset(change.preset) : contactValue(cur, change.key, change.value);
+    this.set({ live: { ...this.s.live, contact } }); this.saveSettings();
+    const rc = resolveContact(contact);
+    this._filterOpts = rc.filter;
+    this.filters.clear(); // new smoothing from the next frame on
+    this.tracker?.setOptions(rc.tracker);
+    this.log('contact-settings', contact);
   }
   setLive(patch) {
     this.set({ live: { ...this.s.live, ...patch } }); this.saveSettings();
@@ -870,6 +896,9 @@ class App {
     const lat = performance.now() - t0;
     this.poseBusy = false;
     this._lat = this._lat ? this._lat * 0.9 + lat * 0.1 : lat;
+    this.meter.add('pose', lat);
+    if (this._lastStepAt) this.meter.add('frame', now - this._lastStepAt);
+    this._lastStepAt = now;
     this._poseFrames++;
     const t = now - this.recorder.startedAt, toWall = (p) => this.imgToWall(p.x, p.y);
     const pick = pickClimber(poses, c.map(([x, y]) => [x / W, y / H]), this.prevPerson);
@@ -885,7 +914,7 @@ class App {
         if (!raw[limb]) { for (let i = 0; i < 2; i++) this.filters.delete(limb + i); continue; }
         wallLimbs[limb] = raw[limb].map((p, i) => {
           const [wx, wy] = this._adjust(limb, ...toWall(p));
-          let f = this.filters.get(limb + i); if (!f) { f = new OneEuro2D({ minCutoff: 1.6, beta: 0.05 }); this.filters.set(limb + i, f); }
+          let f = this.filters.get(limb + i); if (!f) { f = new OneEuro2D(this._filterOpts); this.filters.set(limb + i, f); }
           const [fx, fy] = f.filter(wx, wy, now / 1000);
           return { x: fx, y: fy };
         });
@@ -896,7 +925,7 @@ class App {
     this.liveDraw = { skeleton, limbs: wallLimbs, contacts: this.tracker.contacts, person: !!pick };
     if (events.length) {
       const byId = new Map(this.holds.map((h) => [h.id, h]));
-      for (const e of events) { const h = byId.get(e.hold); this.bus.emit({ type: 'contact', t: now - this.recorder.startedAt, limb: e.limb, hold: h?.label ?? e.hold, holdId: e.hold, led: h?.led ?? null, on: e.on }); }
+      for (const e of events) { if (e.on && e.since != null) this.meter.add('hold', e.t - e.since); const h = byId.get(e.hold); this.bus.emit({ type: 'contact', t: now - this.recorder.startedAt, limb: e.limb, hold: h?.label ?? e.hold, holdId: e.hold, led: h?.led ?? null, on: e.on }); }
       const contacts = {};
       for (const [limb, id] of Object.entries(this.tracker.contacts)) { const h = id != null ? byId.get(id) : null; contacts[limb] = h ? { hold: h.label, holdId: h.id, led: h.led ?? null } : null; }
       this.bus.emit({ type: 'state', t, contacts });
@@ -905,8 +934,10 @@ class App {
     if (now - this._lastUi > 120) {
       const fps = Math.round((this._poseFrames * 1000) / (now - this._poseT)); if (now - this._poseT > 1000) { this._poseFrames = 0; this._poseT = now; }
       this._lastUi = now;
+      let timing = this.s.live.timing;
+      if (now - this._timingAt > 1000) { this._timingAt = now; timing = { pose: this.meter.stats('pose')?.median ?? null, hold: this.meter.stats('hold')?.median ?? null, led: this.meter.stats('led')?.median ?? null }; }
       this.set({
-        live: { ...this.s.live, fps: fps || this.s.live.fps, latency: Math.round(this._lat), person: !!pick, contacts: { ...this.tracker.contacts } },
+        live: { ...this.s.live, fps: fps || this.s.live.fps, latency: Math.round(this._lat), timing, person: !!pick, contacts: { ...this.tracker.contacts } },
         session: { ...this.s.session, events: this.recorder.events.length, duration: t },
       });
     }
@@ -976,7 +1007,7 @@ class App {
         confidenceHistogram: { '0-0.2': confBins[0], '0.2-0.4': confBins[1], '0.4-0.6': confBins[2], '0.6-0.8': confBins[3], '0.8-1': confBins[4] },
         lastScan: s.board.scan.result, bleChunkDelayMs: this.board?.delay ?? null, bleWithoutResponse: t?.fast !== false, lastLedUpdateMs: this.board?.lastMs ?? null,
       },
-      live: { running: s.live.running, variant: s.live.variant, activeVariant: s.live.activeVariant, delegate: s.live.delegate, fps: s.live.fps, latencyMs: s.live.latency, toleranceCm: s.live.tolCm, footUpCm: s.live.footUp, handUpCm: s.live.handUp, perspective: s.live.parallax, facing: s.live.facing, swapLR: s.live.swapLR, session: s.session.summary },
+      live: { running: s.live.running, variant: s.live.variant, activeVariant: s.live.activeVariant, delegate: s.live.delegate, fps: s.live.fps, latencyMs: s.live.latency, toleranceCm: s.live.tolCm, footUpCm: s.live.footUp, handUpCm: s.live.handUp, perspective: s.live.parallax, facing: s.live.facing, swapLR: s.live.swapLR, contactSettings: s.live.contact, latency: this.meter.snapshot(), session: s.session.summary },
       profile: { name: s.profileName, kilter: s.kilter, numbering: s.numbering, numberStart: s.numberStart, routes: s.routes.items.length },
       holds: holds.map((h) => ({ id: h.id, label: h.label, led: h.led ?? null, x: Math.round(h.cx), y: Math.round(h.cy), area: Math.round(h.area), source: h.source })),
       leds: s.board.leds.map((l) => ({ pos: l.pos, x: Math.round(l.x), y: Math.round(l.y), conf: +l.conf.toFixed(2) })),
@@ -1080,7 +1111,7 @@ class App {
     if (tab === 'route' && this.s.routes.sync) this._sendRoute();
   }
   startShow(pattern) {
-    if (this.s.mode === 'live' && this.s.live.running) return;
+    if (this.tracking) return;
     this.lightsOff();
     this._showT0 = performance.now(); this._showById = new Map(this.holds.map((h) => [h.id, h]));
     this.set({ show: { ...this.s.show, running: true, pattern: pattern || this.s.show.pattern } });
@@ -1111,15 +1142,17 @@ class App {
     if (!this.board?.connected) return;
     const sig = leds.map((l) => `${l.pos}:${l.r},${l.g},${l.b}`).sort().join('|');
     if (sig === this._ledSig && !this._ledNext) return;
-    this._ledNext = { leds, sig };
+    this._ledNext = { leds, sig, at: performance.now() };
     if (this._ledBusy) return;
     this._ledBusy = true;
     try {
       while (this._ledNext) {
-        const { leds: next, sig: nextSig } = this._ledNext;
+        const { leds: next, sig: nextSig, at } = this._ledNext;
         this._ledNext = null;
         await this.board.setLeds(next);
         this._ledSig = nextSig;
+        this.meter.add('ledFrame', performance.now() - at);
+        this.meter.add('ledWrite', this.board.lastMs);
       }
     } catch (e) { this.log('led', `update failed: ${e.message}`); }
     finally { this._ledBusy = false; }
@@ -1130,72 +1163,12 @@ class App {
     try { if (this.board?.connected) await this.board.allOff(); } catch (e) { this.log('led', `all off failed: ${e.message}`); }
   }
 
-  // ---------- games ----------
-  selectGame(id) { if (!this.s.game.active) this.set({ game: { ...this.s.game, id } }); }
-  setGameOpts(patch) {
-    if (this.s.game.active) return;
-    const opts = { ...this.s.game.opts, ...patch };
-    this.set({ game: { ...this.s.game, opts } });
-    try { localStorage.setItem(GAME_OPTS_KEY, JSON.stringify(opts)); } catch { /* storage unavailable */ }
-  }
-  /**
-   * What the game may use. With an LED map only holds that have an LED are playable (a hold without light would be an
-   * invisible coin or trap), and with the status strips on, the strips' LEDs are not. Without any LED map every hold is
-   * (screen only).
-   */
-  _gamePlan() {
-    const holds = this.holds.filter((h) => !h.ghost), mapped = holds.some((h) => h.led != null);
-    const layout = this.s.board.leds.length ? buildLayout(this.s.board.leds, this.wallDims.pxPerCm) : null;
-    const onWall = !!(this.board?.connected && mapped);
-    const hud = onWall && this.s.game.opts.hud && !!layout?.hud;
-    const playable = mapped ? holds.filter((h) => h.led != null && !(hud && isReserved(layout, h.led))) : holds;
-    return { holds: playable, layout: onWall ? layout : null, hud, onWall };
-  }
-  startGame(id = this.s.game.id) {
-    if (!(this.s.mode === 'live' && this.s.live.running && this.tracker)) { this.toast('Start live tracking first: games use the climber\'s hand and foot contacts.'); return; }
-    const plan = this._gamePlan();
-    if (plan.holds.length < 8) { this.toast('Too few playable holds. Scan the LEDs first so the holds have lights.', 'error'); return; }
-    this.stopGame(false);
-    this._gameLayout = plan.layout; this._gameHud = plan.hud;
-    this._gameById = new Map(plan.holds.map((h) => [h.id, h]));
-    this.game = createGame(id, plan.holds, this.wallDims, rng((Date.now() ^ (performance.now() * 1000)) >>> 0), this.s.game.opts.difficulty);
-    this.game.start(performance.now());
-    this._gameOverSeen = false; this._gameLed = 0;
-    this.kilterSink?.setEnabled(false); // the game decides what lights; hands/feet lighting would fight it
-    this.log('game', { start: id, difficulty: this.s.game.opts.difficulty, playable: plan.holds.length, onWall: plan.onWall, hud: plan.hud });
-    this.set({ game: { ...this.s.game, id, active: true, state: this.game.state(performance.now()), info: { onWall: plan.onWall, hud: plan.hud, playable: plan.holds.length } } });
-  }
-  async stopGame(restoreSink = true) {
-    if (!this.game) return;
-    this.game = null; this.showLit = null; this.showZones = null; this.showLeds = null; this._gameLayout = null;
-    this.set({ game: { ...this.s.game, active: false, state: null } });
-    await this._ledsOff();
-    if (restoreSink && this.s.live.running) this.kilterSink?.setEnabled(this.s.live.lightBoard && !!this.board?.connected);
-  }
-  _gameTick(now) {
-    const g = this.game, contacts = this.tracker?.contacts ?? { LH: null, RH: null, LF: null, RF: null };
-    g.update(now, contacts);
-    if (g.over && !this._gameOverSeen) {
-      this._gameOverSeen = true;
-      const id = this.s.game.id, best = this.s.game.best;
-      if (g.score > (best[id] || 0)) {
-        g.record = true;
-        const next = { ...best, [id]: g.score };
-        this.set({ game: { ...this.s.game, best: next } });
-        try { localStorage.setItem(BEST_KEY, JSON.stringify(next)); } catch { /* storage unavailable */ }
-      }
-      this.log('game', { over: id, score: g.score, record: g.record });
-    }
-    // what the wall shows: target LEDs, obstacle areas (every LED inside, bound to a hold or not), status strips, effects
-    const out = g.output(now), holdLeds = [];
-    for (const [id, color] of out.lit) { const h = this._gameById.get(id); if (h?.led != null) holdLeds.push({ pos: h.led, color }); }
-    const frame = composeWall(this._gameLayout, { holdLeds, zones: out.zones, hud: out.hud, fx: out.fx }, { hudOn: this._gameHud });
-    const at = new Map(this.s.board.leds.map((l) => [l.pos, l]));
-    this.showLit = out.lit; this.showZones = out.zones;
-    this.showLeds = frame.map((l) => ({ ...l, x: at.get(l.pos)?.x, y: at.get(l.pos)?.y })).filter((l) => l.x != null);
-    if (now - this._gameLed >= GAME_LED_INTERVAL_MS) { this._gameLed = now; this._pushLeds(frame); }
-    if (now - this._gameUi >= GAME_UI_INTERVAL_MS || g.over) { this._gameUi = now; this.set({ game: { ...this.s.game, state: g.state(now) } }); }
-  }
+  // ---------- games (logic in gamesController.js) ----------
+  selectGame(id) { this.games.select(id); }
+  setGameOpts(patch) { this.games.setOpts(patch); }
+  startGame(id) { return this.games.start(id); }
+  startWallTest() { return this.games.startWallTest(); }
+  stopGame(restoreSink) { return this.games.stop(restoreSink); }
 
   get activeRoute() { const r = this.s.routes; return r.items.find((i) => i.id === r.active) || null; }
   _setRoutes(patch) { this.set({ routes: { ...this.s.routes, ...patch } }); this.saveSoon(); }

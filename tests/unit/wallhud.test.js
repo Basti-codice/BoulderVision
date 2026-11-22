@@ -107,3 +107,14 @@ test('without a layout only the target LEDs are returned', () => {
   const f = composeWall(null, { holdLeds: [{ pos: 5, color: { r: 1, g: 2, b: 3 } }], zones: [{ x0: 0, x1: 9, y0: 0, y1: 9, color: { r: 9, g: 9, b: 9 } }], hud: { top: { kind: 'bar', value: 1, color: { r: 1, g: 1, b: 1 } } }, fx: { kind: 'go' } });
   assert.deepEqual(f, [{ pos: 5, r: 1, g: 2, b: 3 }]);
 });
+
+test('priority on one LED: effect > flash > hand/foot > target > zone > status strip', () => {
+  const c = (n) => ({ r: n, g: n, b: n });
+  const pos = L.middle[5].pos, z = [{ x0: 0, x1: 5000, y0: L.middle[5].y - 3, y1: L.middle[5].y + 3, color: c(10) }];
+  const at = (parts) => composeWall(L, parts).find((l) => l.pos === pos)?.r;
+  assert.equal(at({ zones: z }), 10);
+  assert.equal(at({ zones: z, holdLeds: [{ pos, color: c(20) }] }), 20);
+  assert.equal(at({ zones: z, holdLeds: [{ pos, color: c(20) }], limbLeds: [{ pos, color: c(30) }] }), 30);
+  assert.equal(at({ zones: z, holdLeds: [{ pos, color: c(20) }], limbLeds: [{ pos, color: c(30) }], flashLeds: [{ pos, color: c(40) }] }), 40);
+  assert.equal(at({ flashLeds: [{ pos, color: c(40) }], fx: { kind: 'countdown', n: 3 } }), 255, 'an effect covers everything (the row is red)');
+});

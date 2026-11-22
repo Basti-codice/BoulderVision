@@ -271,10 +271,38 @@ games.afterStop2 = await page.evaluate(async () => { const a = window.__bv; awai
 console.log('   games', JSON.stringify(games));
 check('game countdown is shown on the wall (one row of LEDs)', games.countdown.fx === 'countdown' && games.countdown.board >= 10 && games.countdown.board <= 30, JSON.stringify(games.countdown));
 check('coins game: coins plus the status strips on the wall', games.coins.phase === 'running' && games.coins.coins === 2 && games.coins.screen === 2 && games.coins.onWall && games.coins.hudOn && games.coins.board >= 10 && games.coins.board <= 64 && games.coins.dots >= games.coins.board - 2, JSON.stringify(games.coins));
-check('coins game without status strips: only the coins', games.coinsNoHud.board >= 1 && games.coinsNoHud.board <= 3, JSON.stringify(games.coinsNoHud));
+check('coins game without status strips: the coins and the limbs only', games.coinsNoHud.board >= 1 && games.coinsNoHud.board <= 7, JSON.stringify(games.coinsNoHud));
 check('dodge game: bars on the wall (areas, not only holds), lives on the top edge', games.dodge.phase === 'running' && games.dodge.bars >= 1 && games.dodge.zones >= 1 && games.dodge.board >= 10 && games.dodge.board <= 64, JSON.stringify(games.dodge));
 check('stopping a game switches the board off', games.afterStop === 0 && games.afterStop2 === 0);
 await shot('06b-game');
+// --- games area (own mode), wall test, responsiveness menu, latency stats
+await page.click('.tabs button:has-text("Games")');
+await page.waitForSelector('.game-card');
+const area = await page.evaluate(async () => {
+  const a = window.__bv, wait = (ms) => new Promise((r) => setTimeout(r, ms)), out = {};
+  out.mode = a.s.mode; out.tracking = a.tracking; out.cards = document.querySelectorAll('.game-card').length;
+  a.startWallTest(); await wait(1500);
+  out.test = { active: a.s.game.active, current: a.s.game.current, board: a.world.lit.size, fx: a.game?.output(performance.now()).fx?.kind };
+  await a.stopGame(); await wait(600);
+  out.afterTest = a.world.lit.size;
+  a.setContact({ preset: 'fast' });
+  out.fast = { onMs: a.tracker.opt.onMs, preset: a.s.live.contact.preset };
+  a.setContact({ key: 'holdMs', value: 45 });
+  out.custom = { onMs: a.tracker.opt.onMs, preset: a.s.live.contact.preset };
+  a.setContact({ preset: 'balanced' });
+  await wait(1200);
+  const rep = a.buildDebugReport();
+  out.latency = Object.keys(rep.live.latency); out.contactSettings = rep.live.contactSettings.preset;
+  return out;
+});
+console.log('   games area', JSON.stringify(area));
+check('games area: own mode with tracking and the game cards', area.mode === 'games' && area.tracking && area.cards >= 2);
+check('wall test lights the wall without climbing and switches it off', area.test.active && area.test.current === 'walltest' && area.test.board >= 10 && area.afterTest === 0, JSON.stringify(area.test));
+check('responsiveness: preset and single values reach the tracker', area.fast.onMs === 30 && area.fast.preset === 'fast' && area.custom.onMs === 45 && area.custom.preset === 'custom');
+check('latency stats are in the debug report', ['pose', 'frame'].every((k) => area.latency.includes(k)) && area.contactSettings === 'balanced', JSON.stringify(area.latency));
+await shot('06d-games-area');
+await page.click('.tabs button:has-text("Live")');
+
 
 const sum = await page.evaluate(async () => { const a = window.__bv; await a.stopLive(); return { events: a.recorder.events.length, lit: [...a.world.lit.keys()].length, summary: a.s.session.summary }; });
 console.log('   session', JSON.stringify(sum));
