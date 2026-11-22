@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { LatencyMeter } from '../../src/core/latency.js';
 import { PRESETS, DEFAULT_PRESET, LIMITS, sanitize, withPreset, withValue, filterParams, resolve } from '../../src/core/responsiveness.js';
 import { ContactTracker } from '../../src/core/contact.js';
+import { KilterSink } from '../../src/outputs/sinks.js';
 
 test('latency meter: median, p95, last and the number of samples ever; the buffer is bounded', () => {
   const m = new LatencyMeter(100);
@@ -72,4 +73,35 @@ test('contact tracker: a contact event says when the limb first hovered over the
   const fast = new ContactTracker(holds, 2, { tolCm: 2.5, onMs: 20 });
   fast.update(0, { LH: [{ x: 10, y: 10 }] });
   assert.equal(fast.update(25, { LH: [{ x: 10, y: 10 }] }).length, 1, 'a shorter hold time counts sooner');
+});
+
+test('responsiveness: junk input (null, strings, arrays) falls back to the default', () => {
+  assert.deepEqual(sanitize(null), sanitize({}));
+  assert.deepEqual(sanitize('x'), sanitize({}));
+  assert.equal(sanitize({ preset: 'precise' }).smoothing, PRESETS.precise.smoothing);
+});
+
+test('kilter sink timing: every flush reports the age of the first change it carried, also when a change arrives during a write', async () => {
+  const sent = [];
+  let release;
+  const board = { lastMs: 7, setLeds: (leds) => new Promise((res) => { sent.push(leds.length); release = res; }) };
+  const timings = [];
+  const sink = new KilterSink(board, null, (t) => timings.push(t));
+  sink.enabled = true;
+  const state = (led) => ({ type: 'state', contacts: { LH: { led }, RH: null, LF: null, RF: null } });
+  sink.handle(state(5));                    // flush 1 starts
+  await new Promise((r) => setTimeout(r, 30));
+  sink.handle(state(6));                    // arrives while flush 1 is in flight
+  await new Promise((r) => setTimeout(r, 20));
+  release();                                // flush 1 done: reports ~50 ms, flush 2 starts
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(timings.length, 1);
+  assert.ok(timings[0].total >= 45 && timings[0].total < 400, `first change waited ${timings[0].total} ms`);
+  await new Promise((r) => setTimeout(r, 25));
+  release();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(timings.length, 2);
+  assert.ok(timings[1].total >= 25 && timings[1].total < 400, `second change ${timings[1].total} ms`);
+  assert.equal(timings[1].write, 7);
+  assert.deepEqual(sent, [1, 1]);
 });

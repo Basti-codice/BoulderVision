@@ -50,13 +50,13 @@ export class SerialSink {
 
 /** Lights the holds that currently carry a hand/foot on the Aurora board. Coalesces updates (latest wins). */
 export class KilterSink {
-  constructor(board, onError, onTiming) { this.board = board; this.onError = onError; this.onTiming = onTiming; this.enabled = false; this.desired = []; this.busy = false; this.dirty = false; this.changedAt = 0; this.colors = LIMB_COLORS; }
+  constructor(board, onError, onTiming) { this.board = board; this.onError = onError; this.onTiming = onTiming; this.enabled = false; this.desired = []; this.busy = false; this.dirty = false; this.pendingSince = null; this.colors = LIMB_COLORS; }
   handle(msg) {
     if (msg.type !== 'state' || !this.enabled) return;
     const m = new Map();
     for (const [limb, c] of Object.entries(msg.contacts)) if (c && c.led != null) { const [r, g, b] = this.colors[limb]; if (!m.has(c.led) || limb[1] === 'H') m.set(c.led, { pos: c.led, r, g, b }); }
     this.desired = [...m.values()];
-    this.changedAt = performance.now(); // the contact changed now: how long until the board has it?
+    this.pendingSince ??= performance.now(); // the first change not yet sent: how long until the board has it?
     this._flush();
   }
   async setEnabled(on) {
@@ -67,8 +67,13 @@ export class KilterSink {
     if (this.busy) { this.dirty = true; return; }
     this.busy = true;
     try {
-      do { this.dirty = false; await this.board.setLeds(this.desired); } while (this.dirty);
-      this.onTiming?.({ total: performance.now() - this.changedAt, write: this.board.lastMs });
+      do {
+        this.dirty = false;
+        const since = this.pendingSince ?? performance.now();
+        this.pendingSince = null;
+        await this.board.setLeds(this.desired);
+        this.onTiming?.({ total: performance.now() - since, write: this.board.lastMs });
+      } while (this.dirty);
     }
     catch (e) { this.onError?.(e); }
     finally { this.busy = false; }

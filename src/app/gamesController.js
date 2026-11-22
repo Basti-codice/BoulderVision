@@ -106,7 +106,7 @@ export class GamesController {
     a.game = null; a.showLit = null; a.showZones = null; a.showLeds = null; this.layout = null;
     a.set({ game: { ...a.s.game, active: false, current: null, state: null } });
     await a._ledsOff();
-    if (restoreSink && a.s.live.running) a.kilterSink?.setEnabled(a.s.live.lightBoard && !!a.board?.connected);
+    if (restoreSink && !a.game && a.s.live.running) a.kilterSink?.setEnabled(a.s.live.lightBoard && !!a.board?.connected);
   }
 
   _holdLeds(map) {

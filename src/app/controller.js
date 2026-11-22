@@ -740,15 +740,16 @@ class App {
     if (!this.source.active) { this.toast('Start a camera first.', 'error'); return; }
     if (!this.Himg2wall) { this.toast('Mark the wall corners first.', 'error'); return; }
     if (!this.holds.some((h) => !h.ghost)) { this.toast('Detect holds first.', 'error'); return; }
-    const l = this.s.live;
-    this.set({ mode, live: { ...l, loading: true, running: false, error: '' } });
+    this.set({ mode, live: { ...this.s.live, loading: true, running: false, error: '' } });
     try {
+      const variant = this.s.live.variant;
       if (this.s.demo) { this.engine = new DemoPose(this.world); this.world.climber = true; this.world.t0 = null; }
       else {
         if (!this.engine || this.engine instanceof DemoPose) this.engine = new PoseEngine();
-        await this.engine.load(l.variant === 'auto' ? 'heavy' : l.variant);
+        await this.engine.load(variant === 'auto' ? 'heavy' : variant);
       }
       if (token !== this._liveToken) return; // stopped while the model was loading
+      const l = this.s.live; // read after the await: settings changed while the model loaded must count
       this.engine.ensureProbe?.(); // stateless landmarker used while searching for the climber
       const rc = resolveContact(l.contact);
       this.tracker = new ContactTracker(this.holds.filter((h) => !h.ghost), this.pxPerCm, { tolCm: l.tolCm, ...rc.tracker });
@@ -758,7 +759,7 @@ class App {
       this.log('live', { start: true, variant: this.engine.variant, delegate: this.engine.delegate, holds: this.holds.length });
       this.source.alwaysFresh = true;
       this.set({ live: { ...this.s.live, loading: false, running: true, activeVariant: this.engine.variant, delegate: this.engine.delegate }, session: { recording: true, events: 0, duration: 0, replayT: null, playing: false, summary: null } });
-      if (this.kilterSink) this.kilterSink.setEnabled(this.s.live.lightBoard && !!this.board?.connected);
+      if (this.kilterSink) this.kilterSink.setEnabled(this.s.live.lightBoard && !!this.board?.connected && !this.game); // a running game draws the limbs itself
     } catch (e) {
       console.error(e);
       this.set({ mode: 'setup', live: { ...this.s.live, loading: false, running: false, error: e.message } });
@@ -775,18 +776,19 @@ class App {
     if (this.world) this.world.climber = false;
     this.source.alwaysFresh = false;
     this.liveDraw = null;
+    this.tracker = null; // a game or the wall test must not show the old session's last contacts
     try { await this.kilterSink?.setEnabled(false); } catch { /* ignore */ }
   }
   leaveLive() { this.stopLive(); this.set({ mode: 'setup' }); }
   /** Games area: starts tracking when needed (the games use the hand and foot contacts). */
   openGames() {
     if (this.s.mode === 'games') return;
-    if (this.s.live.running) this.set({ mode: 'games' }); else this.startLive('games');
+    if (this.s.live.running || this.s.live.loading) this.set({ mode: 'games' }); else this.startLive('games');
   }
   /** Live view; a running game is stopped, tracking continues. */
   openLive() {
     if (this.s.mode === 'live') return;
-    if (this.s.mode === 'games') { this.stopGame(); this.set({ mode: 'live' }); } else this.startLive('live');
+    if (this.s.mode === 'games' || this.s.live.loading) { this.stopGame(); this.set({ mode: 'live' }); } else this.startLive('live');
   }
 
   async setVariant(v) {
@@ -1066,6 +1068,7 @@ class App {
     catch (e) { console.warn('save failed', e); }
   }
   async _applyProfile(p) {
+    if (this.s.live.running || this.game) await this.stopLive(); // another wall: the tracker and a running game belong to the old holds
     this.holds = clone(p.holds || []); this.holds.forEach((h) => delete h.cand); this.suppress = []; this.ignoredLeds = p.ignoredLeds || []; this.nextId = p.nextId || this.holds.reduce((m, h) => Math.max(m, h.id), 0) + 1;
     this.history = []; this.future = []; this.analysis = null; this.seg = null; this.deleted = new Set(); this.peopleSegs = []; this._runId++; this.snapshot = null; this.snapshotBitmap = null; this.snapshotBlob = p.snapshot || null; this.snapKey = p.snapshot ? '*profile' : null;
     if (p.snapshot instanceof Blob) { const bmp = await createImageBitmap(p.snapshot); const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height; c.getContext('2d').drawImage(bmp, 0, 0); this.snapshotBitmap = c; }

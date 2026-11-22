@@ -5,10 +5,11 @@
 //   maxSpeed    cm/s: moving faster than this is swiping past, not touching
 //   smoothing   0..1: 0 = raw points (quick, jittery), 1 = heavily smoothed (steady, lags behind)
 //
-// Presets are measured trade-offs, not guesses: "precise" is the original behaviour of the app.
+// Presets: "precise" is (close to) the original behaviour of the app (hold 90 ms, cut-off 1.6 Hz); balanced is the default;
+// fast trades some steadiness for speed.
 
 export const PRESETS = {
-  precise:  { holdMs: 90, releaseMs: 120, maxSpeed: 90,  smoothing: 0.85 },
+  precise:  { holdMs: 90, releaseMs: 120, maxSpeed: 90,  smoothing: 0.69 },
   balanced: { holdMs: 60, releaseMs: 120, maxSpeed: 120, smoothing: 0.5 },
   fast:     { holdMs: 30, releaseMs: 90,  maxSpeed: 160, smoothing: 0.15 },
 };
@@ -21,7 +22,8 @@ export const LIMITS = {
 const clamp = (v, [lo, hi]) => Math.min(hi, Math.max(lo, v));
 
 /** Full settings object ({preset, holdMs, releaseMs, maxSpeed, smoothing}) from anything stored or typed. */
-export function sanitize(input = {}) {
+export function sanitize(input) {
+  input = input && typeof input === 'object' ? input : {};
   const preset = PRESETS[input.preset] ? input.preset : input.preset === 'custom' ? 'custom' : DEFAULT_PRESET;
   const base = PRESETS[preset] || PRESETS[DEFAULT_PRESET];
   const out = { preset };

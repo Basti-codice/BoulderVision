@@ -13,6 +13,8 @@
 
 /** At most this many LEDs lit in one frame (one Bluetooth message, a safe current draw). */
 export const MAX_GAME_LEDS = 64;
+/** Even with full status strips this many LEDs stay for targets, limbs and obstacles (a full 24-LED field would otherwise starve them). */
+const FIELD_MIN_LEDS = 16;
 /** A row needs this many LEDs to count as a row of the field (junk LEDs at the border do not). */
 const MIN_ROW_LEDS = 8;
 const MIN_COLUMN_LEDS = 6;
@@ -140,16 +142,25 @@ const inZone = (l, z) => l.x >= z.x0 && l.x <= z.x1 && l.y >= z.y0 && l.y <= z.y
  * @returns {{pos:number, r:number, g:number, b:number}[]}
  */
 export function composeWall(layout, parts, { hudOn = true, cap = MAX_GAME_LEDS } = {}) {
-  const out = new Map();
-  const put = (pos, c) => { if (pos != null && !out.has(pos) && out.size < cap) out.set(pos, c); };
   const useHud = hudOn && !!layout?.hud;
-  if (layout && drawEffect(layout, parts.fx, put)) return [...out].map(([pos, c]) => ({ pos, r: c.r, g: c.g, b: c.b }));
-  for (const t of [...(parts.flashLeds || []), ...(parts.limbLeds || []), ...(parts.holdLeds || [])]) put(t.pos, t.color);
-  if (layout) for (const z of parts.zones || []) for (const l of layout.leds) if (!(useHud && layout.hudPos.has(l.pos)) && inZone(l, z)) put(l.pos, z.color);
+  const finish = (m) => [...m].map(([pos, c]) => ({ pos, r: c.r, g: c.g, b: c.b }));
+  const fxOut = new Map();
+  if (layout && drawEffect(layout, parts.fx, (pos, c) => { if (pos != null && !fxOut.has(pos) && fxOut.size < cap) fxOut.set(pos, c); })) return finish(fxOut);
+  // the status strips first, into their own space: they are never cut short by obstacles (zones give way instead)
+  const strips = new Map();
   if (useHud && parts.hud) {
-    drawStrip(layout.top, parts.hud.top, put);
-    drawStrip(layout.left, parts.hud.left, put);
-    drawStrip(layout.bottom, parts.hud.bottom, put);
+    const putStrip = (pos, c) => { if (pos != null && !strips.has(pos) && strips.size < cap - FIELD_MIN_LEDS) strips.set(pos, c); };
+    drawStrip(layout.top, parts.hud.top, putStrip);
+    drawStrip(layout.left, parts.hud.left, putStrip);
+    drawStrip(layout.bottom, parts.hud.bottom, putStrip);
   }
-  return [...out].map(([pos, c]) => ({ pos, r: c.r, g: c.g, b: c.b }));
+  const room = cap - strips.size, out = new Map();
+  const put = (pos, c) => { if (pos != null && !out.has(pos) && out.size < room) out.set(pos, c); };
+  const onStrip = (pos) => useHud && layout.hudPos.has(pos);
+  for (const t of parts.flashLeds || []) put(t.pos, t.color);
+  for (const t of parts.limbLeds || []) if (!onStrip(t.pos)) put(t.pos, t.color); // a hand on a strip's hold must not look like part of the display
+  for (const t of parts.holdLeds || []) put(t.pos, t.color);
+  if (layout) for (const z of parts.zones || []) for (const l of layout.leds) if (!onStrip(l.pos) && inZone(l, z)) put(l.pos, z.color);
+  for (const [pos, c] of strips) if (!out.has(pos)) out.set(pos, c);
+  return finish(out);
 }

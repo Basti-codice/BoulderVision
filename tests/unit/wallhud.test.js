@@ -118,3 +118,25 @@ test('priority on one LED: effect > flash > hand/foot > target > zone > status s
   assert.equal(at({ zones: z, holdLeds: [{ pos, color: c(20) }], limbLeds: [{ pos, color: c(30) }], flashLeds: [{ pos, color: c(40) }] }), 40);
   assert.equal(at({ flashLeds: [{ pos, color: c(40) }], fx: { kind: 'countdown', n: 3 } }), 255, 'an effect covers everything (the row is red)');
 });
+
+test('the status strips are complete even when obstacles use up the cap; limbs on a strip hold are not drawn', () => {
+  const red = { r: 255, g: 0, b: 0 };
+  const hud = { top: { kind: 'bar', value: 0.5, color: { r: 0, g: 255, b: 0 } }, left: { kind: 'count', n: 3, color: { r: 0, g: 0, b: 255 } }, bottom: { kind: 'ticks', count: 10 } };
+  const everything = [{ x0: 0, x1: 5000, y0: 0, y1: 5000, color: red }];
+  const f = composeWall(L, { zones: everything, hud, limbLeds: [{ pos: L.top[3].pos, color: { r: 0, g: 255, b: 255 } }, { pos: L.middle[3].pos, color: { r: 0, g: 255, b: 255 } }] });
+  assert.equal(f.length, MAX_GAME_LEDS);
+  const stripPos = [...L.top.slice(0, 12), ...L.left.slice(0, 3), ...L.bottom.slice(0, 10)].map((l) => l.pos);
+  for (const pos of stripPos) assert.ok(f.some((l) => l.pos === pos), `strip LED ${pos} missing`);
+  const topLed = f.find((l) => l.pos === L.top[3].pos);
+  assert.deepEqual([topLed.r, topLed.g, topLed.b], [0, 255, 0], 'the strip colour, not the limb colour');
+  const hand = f.find((l) => l.pos === L.middle[3].pos);
+  assert.deepEqual([hand.r, hand.g, hand.b], [0, 255, 255], 'a limb inside the field is still shown');
+});
+
+test('even completely full status strips leave room for targets and limbs', () => {
+  const full = { top: { kind: 'bar', value: 1, color: { r: 0, g: 255, b: 0 } }, left: { kind: 'bar', value: 1, color: { r: 0, g: 0, b: 255 } }, bottom: { kind: 'ticks', count: 24 } };
+  const targets = L.middle.slice(2, 8).map((l) => ({ pos: l.pos, color: { r: 255, g: 200, b: 0 } }));
+  const f = composeWall(L, { holdLeds: targets, hud: full });
+  assert.ok(f.length <= MAX_GAME_LEDS);
+  for (const t of targets) assert.ok(f.some((l) => l.pos === t.pos), 'target kept');
+});
