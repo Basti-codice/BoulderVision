@@ -775,7 +775,7 @@ class App {
     this.set({ live: { ...this.s.live, loading: false, running: false, person: false, contacts: { LH: null, RH: null, LF: null, RF: null } }, session: { ...this.s.session, recording: false, duration: this.recorder.duration, events: this.recorder.events.length, summary: this.recorder.summary() } });
     if (this.world) this.world.climber = false;
     this.source.alwaysFresh = false;
-    this.liveDraw = null;
+    this.liveDraw = null; this.liveBody = null;
     this.tracker = null; // a game or the wall test must not show the old session's last contacts
     try { await this.kilterSink?.setEnabled(false); } catch { /* ignore */ }
   }
@@ -861,9 +861,16 @@ class App {
    * the body pushed away from the point it looks at; pull points back towards that centre. Plus manual up-shifts.
    */
   _adjust(limb, x, y) {
-    const { parallax, footUp, handUp } = this.s.live, px = this.pxPerCm;
-    if (parallax > 0) { const c = this._viewCentre ??= this.imgToWall(this.source.width / 2, this.source.height / 2); x = c[0] + (x - c[0]) * (1 - parallax); y = c[1] + (y - c[1]) * (1 - parallax); }
+    const { footUp, handUp } = this.s.live, px = this.pxPerCm;
+    [x, y] = this._parallax(x, y);
     return [x, y - (limb.endsWith('F') ? footUp : handUp) * px];
+  }
+  /** The camera sees the body in front of the wall pushed away from the point it looks at: pull points back towards that centre. */
+  _parallax(x, y) {
+    const { parallax } = this.s.live;
+    if (!(parallax > 0)) return [x, y];
+    const c = this._viewCentre ??= this.imgToWall(this.source.width / 2, this.source.height / 2);
+    return [c[0] + (x - c[0]) * (1 - parallax), c[1] + (y - c[1]) * (1 - parallax)];
   }
 
   _liveStep(now) {
@@ -925,6 +932,8 @@ class App {
       events = this.tracker.update(now, wallLimbs);
     } else { this.prevPerson = null; this._lost = (this._lost ?? 0) + 1; if (this._lost >= 4) this.track = null; events = this.tracker.update(now, wallLimbs); }
     this.liveDraw = { skeleton, limbs: wallLimbs, contacts: this.tracker.contacts, person: !!pick };
+    // the whole body for the games (wall px, parallax corrected, no hand/foot shifts): one entry per pose frame
+    this.liveBody = { t: now, joints: skeleton ? skeleton.map((p) => { const [x, y] = this._parallax(p.x, p.y); return { x, y, v: p.v }; }) : null };
     if (events.length) {
       const byId = new Map(this.holds.map((h) => [h.id, h]));
       for (const e of events) { if (e.on && e.since != null) this.meter.add('hold', e.t - e.since); const h = byId.get(e.hold); this.bus.emit({ type: 'contact', t: now - this.recorder.startedAt, limb: e.limb, hold: h?.label ?? e.hold, holdId: e.hold, led: h?.led ?? null, on: e.on }); }

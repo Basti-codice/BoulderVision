@@ -56,7 +56,9 @@ export function GameHud() {
   let line;
   if (id === 'walltest') line = over ? html`<b>Wall test</b><span>Done</span>` : html`<b>Wall test</b><span>Watch the wall</span><span>${mmss(st.secondsLeft)}</span>`;
   else if (st.phase === 'ready') line = html`<b>Get ready</b><span class="big">${st.countdown}</span>`;
+  else if (st.paused && !over) line = html`<b>Tracking lost</b><span>The game is paused until the climber is seen again</span>`;
   else if (id === 'coins') line = over ? html`<b>Time is up</b><span class="big">${st.score}</span><span>coins score · best ${best}</span>` : html`<b>Coins</b><span class="big">${st.score}</span><span>${st.combo > 1 ? `combo ×${st.combo}` : ''}</span><span>${mmss(st.secondsLeft)}</span>`;
+  else if (id === 'chaser') line = over ? html`<b>Caught</b><span class="big">${st.score} s</span><span>survived · best ${best} s</span>` : html`<b>Chaser</b><span class="big">${st.score} s</span><span class="hearts">${'♥'.repeat(st.lives)}${'♡'.repeat(Math.max(0, st.maxLives - st.lives))}</span>${st.frozen ? html`<span>frozen</span>` : ''}`;
   else line = over ? html`<b>Game over</b><span class="big">${st.score} s</span><span>survived · best ${best} s</span>` : html`<b>Dodge</b><span class="big">${st.score} s</span><span class="hearts">${'♥'.repeat(st.lives)}${'♡'.repeat(Math.max(0, st.maxLives - st.lives))}</span>`;
   const again = () => (id === 'walltest' ? app.startWallTest() : app.startGame(id));
   return html`<div class=${`game-hud ${over ? 'over' : ''}`}>${line}${over && html`<span class="hud-btns"><button class="btn primary" onClick=${again}>${id === 'walltest' ? 'Run again' : 'Play again'}</button><button class="btn" onClick=${() => app.stopGame()}>Close</button></span>`}</div>`;

@@ -2,7 +2,8 @@
 // output into LEDs (and the on-screen mirror), records. The rules of a game are in src/game/games.js, how things are drawn
 // on the LED field in src/game/wallhud.js; this file is only the glue to the app (tracker, board, state).
 
-import { createGame, GAMES, OPTIONS, recordKey } from '../game/games.js';
+import { createGame, GAMES, OPTIONS, COLORS, recordKey } from '../game/games.js';
+import { BodyModel } from '../game/body.js';
 import { WallTest } from '../game/walltest.js';
 import { buildLayout, composeWall, isReserved } from '../game/wallhud.js';
 import { LIMB_COLORS } from '../outputs/sinks.js';
@@ -26,6 +27,10 @@ export class GamesController {
     this.ledAt = new Map();      // LED position -> {x, y}
     this.overSeen = false;
     this.uiAt = 0;
+    this.body = null;            // the climber's body of the running game (BodyModel)
+    this.bodyT = -1;             // time of the pose frame the body was last updated with
+    this.boneLeds = null;        // LED positions of the stick figure for that pose frame
+    this.boneRadiusPx = 0;
   }
 
   /** Stored records and settings into the state. Records of the old format ({coins: 12}) count as "medium". */
@@ -64,7 +69,20 @@ export class GamesController {
     const onWall = !!(a.board?.connected && mapped);
     const strips = onWall && hud && !!layout?.hud;
     const playable = mapped ? holds.filter((h) => h.led != null && !(strips && isReserved(layout, h.led))) : holds;
-    return { holds: playable, layout: onWall ? layout : null, hud: strips, onWall };
+    const wall = { ...a.wallDims, ...this._field(playable, layout, strips) };
+    return { holds: playable, layout: onWall ? layout : null, hud: strips, onWall, wall };
+  }
+
+  /**
+   * Where a game plays: the box around the playable holds (half an LED spacing wider), without the status strips; plus the LED
+   * spacing in px (the games size obstacles and lights by it). Without any holds the whole wall.
+   */
+  _field(playable, layout, strips) {
+    const a = this.app, rowPitchPx = layout?.pitchY || 0, colPitchPx = layout?.pitchX || 0;
+    const pts = layout && strips ? layout.leds.filter((l) => !layout.hudPos.has(l.pos)) : playable.map((h) => ({ x: h.cx, y: h.cy }));
+    if (pts.length < 4) return { field: { x0: 0, y0: 0, x1: a.wallDims.RW, y1: a.wallDims.RH }, rowPitchPx, colPitchPx };
+    const mx = (colPitchPx || a.wallDims.pxPerCm * 14) / 2, my = (rowPitchPx || a.wallDims.pxPerCm * 14) / 2;
+    return { field: { x0: Math.min(...pts.map((p) => p.x)) - mx, x1: Math.max(...pts.map((p) => p.x)) + mx, y0: Math.min(...pts.map((p) => p.y)) - my, y1: Math.max(...pts.map((p) => p.y)) + my }, rowPitchPx, colPitchPx };
   }
 
   _begin(game, plan, id) {
@@ -74,6 +92,9 @@ export class GamesController {
     this.holdsById = new Map(a.holds.map((h) => [h.id, h]));
     this.ledAt = new Map(a.s.board.leds.map((l) => [l.pos, l]));
     this.overSeen = false;
+    this.body = new BodyModel({ pxPerCm: a.wallDims.pxPerCm }); this.bodyT = -1; this.boneLeds = null;
+    this.boneRadiusPx = 0.55 * Math.min(plan.wall.colPitchPx || Infinity, plan.wall.rowPitchPx || Infinity);
+    if (!Number.isFinite(this.boneRadiusPx) || this.boneRadiusPx <= 0) this.boneRadiusPx = a.wallDims.pxPerCm * 8;
     a.game = game;
     game.start(performance.now());
     a.kilterSink?.setEnabled(false); // the game draws the hands and feet itself, on top of its own lights
@@ -87,7 +108,7 @@ export class GamesController {
     if (plan.holds.length < MIN_PLAYABLE_HOLDS) { a.toast('Too few playable holds. Scan the LEDs first so the holds have lights.', 'error'); return; }
     this.stop(false);
     const { difficulty } = a.s.game.opts;
-    this._begin(createGame(id, plan.holds, a.wallDims, rng((Date.now() ^ (performance.now() * 1000)) >>> 0), difficulty), plan, id);
+    this._begin(createGame(id, plan.holds, plan.wall, rng((Date.now() ^ (performance.now() * 1000)) >>> 0), difficulty), plan, id);
     a.log('game', { start: id, difficulty, playable: plan.holds.length, onWall: plan.onWall, hud: plan.hud });
   }
 
@@ -96,7 +117,7 @@ export class GamesController {
     const a = this.app, plan = this.plan({ hud: true });
     if (!plan.onWall) { a.toast('Connect the board and scan the LEDs first: the test shows on the wall.', 'error'); return; }
     this.stop(false);
-    this._begin(new WallTest(plan.holds, a.wallDims), plan, 'walltest');
+    this._begin(new WallTest(plan.holds, plan.wall), plan, 'walltest');
     a.log('game', { start: 'walltest', onWall: true, hud: plan.hud });
   }
 
@@ -147,10 +168,18 @@ export class GamesController {
   tick(now) {
     const a = this.app, g = a.game;
     if (!g) return;
-    g.update(now, a.tracker?.contacts ?? NO_CONTACTS);
+    const lb = a.liveBody;
+    if (lb && lb.t !== this.bodyT) { this.bodyT = lb.t; this.body.update(lb.t, lb.joints); this.boneLeds = null; } // one body update per pose frame
+    const tracked = a.tracking ? this.body.trackedAt(now) : true;
+    g.update(now, { contacts: a.tracker?.contacts ?? NO_CONTACTS, body: this.body, tracked });
     if (g.over && !this.overSeen) this._finish(g);
     const out = g.output(now);
-    const frame = composeWall(this.layout, { flashLeds: this._holdLeds(out.flash), limbLeds: this._limbLeds(), holdLeds: this._holdLeds(out.lit), zones: out.zones, hud: out.hud, fx: out.fx }, { hudOn: this.hud });
+    let body;
+    if (g.showsBody && this.layout && this.body.tracked) {
+      this.boneLeds ??= this.body.boneLeds(this.layout.leds, this.boneRadiusPx);
+      body = { leds: this.boneLeds, color: out.bodyTint ?? COLORS.body, overlapColor: COLORS.overlap };
+    }
+    const frame = composeWall(this.layout, { flashLeds: this._holdLeds(out.flash), limbLeds: this._limbLeds(), holdLeds: this._holdLeds(out.lit), marks: out.marks, zones: out.zones, body, hud: out.hud, fx: out.fx }, { hudOn: this.hud });
     a.showLit = out.lit; a.showZones = out.zones;
     a.showLeds = frame.map((l) => ({ ...l, x: this.ledAt.get(l.pos)?.x, y: this.ledAt.get(l.pos)?.y })).filter((l) => l.x != null);
     a._pushLeds(frame); // latest wins: a slow link never queues frames, identical frames are not resent

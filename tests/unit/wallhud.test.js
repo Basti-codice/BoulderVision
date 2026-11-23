@@ -38,26 +38,25 @@ test('layout: too few LEDs or no rows -> no strips', () => {
 
 test('bar: a share of the strip lights from the left; segments are blocks with a dark LED between them', () => {
   const half = composeWall(L, { hud: { top: { kind: 'bar', value: 0.5, color: { r: 0, g: 255, b: 0 } } } });
-  assert.equal(half.length, 12);
+  assert.equal(half.length, 6, 'every second LED: 12 slots, half of them lit');
   assert.ok(half.every((l) => L.top.slice(0, 12).some((t) => t.pos === l.pos)));
   assert.equal(composeWall(L, { hud: { top: { kind: 'bar', value: 0, color: { r: 1, g: 1, b: 1 } } } }).length, 0);
-  assert.equal(composeWall(L, { hud: { top: { kind: 'bar', value: 1, color: { r: 1, g: 1, b: 1 } } } }).length, 24);
+  assert.equal(composeWall(L, { hud: { top: { kind: 'bar', value: 1, color: { r: 1, g: 1, b: 1 } } } }).length, 12);
   const seg = composeWall(L, { hud: { top: { kind: 'segments', count: 3, lit: 2, color: { r: 255, g: 0, b: 0 } } } });
-  assert.equal(seg.length, 14, 'two blocks of seven');
+  assert.equal(seg.length, 4, 'two blocks of two LEDs');
   const index = seg.map((l) => L.top.findIndex((t) => t.pos === l.pos)).sort((a, b) => a - b);
   assert.ok(index.some((v, i) => i && v - index[i - 1] === 2), 'a dark LED between the blocks');
 });
 
-test('ticks: one LED per point, a second lap restarts the row in another colour', () => {
+test('ticks: one slot per point (every second LED), a second lap restarts the row in another colour', () => {
   const at = (n) => composeWall(L, { hud: { bottom: { kind: 'ticks', count: n } } });
   assert.equal(at(0).length, 0);
   assert.equal(at(7).length, 7);
-  const full = at(24);
-  assert.equal(full.length, 24);
-  const lap2 = at(30), first = lap2.find((l) => l.pos === L.bottom[0].pos), last = lap2.find((l) => l.pos === L.bottom[23].pos);
-  assert.equal(lap2.length, 24, 'the rest of the row keeps the colour of the lap before');
-  assert.notDeepEqual([first.r, first.g, first.b], [last.r, last.g, last.b], 'the 6 LEDs of the new lap differ from the rest');
-  assert.equal(cnt(lap2, (l) => l.g === first.g && l.r === first.r && l.b === first.b), 6);
+  assert.equal(at(12).length, 12, 'a full row of 12 slots');
+  const lap2 = at(15), first = lap2.find((l) => l.pos === L.bottom[0].pos), last = lap2.find((l) => l.pos === L.bottom[22].pos);
+  assert.equal(lap2.length, 12, 'the rest of the row keeps the colour of the lap before');
+  assert.notDeepEqual([first.r, first.g, first.b], [last.r, last.g, last.b], 'the 3 slots of the new lap differ from the rest');
+  assert.equal(lap2.filter((l) => l.g === first.g && l.r === first.r && l.b === first.b).length, 3);
 });
 
 test('zones: every LED inside lights, hold or not; the HUD strips are not painted over; targets win', () => {
@@ -123,11 +122,11 @@ test('the status strips are complete even when obstacles use up the cap; limbs o
   const red = { r: 255, g: 0, b: 0 };
   const hud = { top: { kind: 'bar', value: 0.5, color: { r: 0, g: 255, b: 0 } }, left: { kind: 'count', n: 3, color: { r: 0, g: 0, b: 255 } }, bottom: { kind: 'ticks', count: 10 } };
   const everything = [{ x0: 0, x1: 5000, y0: 0, y1: 5000, color: red }];
-  const f = composeWall(L, { zones: everything, hud, limbLeds: [{ pos: L.top[3].pos, color: { r: 0, g: 255, b: 255 } }, { pos: L.middle[3].pos, color: { r: 0, g: 255, b: 255 } }] });
+  const f = composeWall(L, { zones: everything, hud, limbLeds: [{ pos: L.top[4].pos, color: { r: 0, g: 255, b: 255 } }, { pos: L.middle[3].pos, color: { r: 0, g: 255, b: 255 } }] });
   assert.equal(f.length, MAX_GAME_LEDS);
-  const stripPos = [...L.top.slice(0, 12), ...L.left.slice(0, 3), ...L.bottom.slice(0, 10)].map((l) => l.pos);
+  const stripPos = [...L.top.filter((_, i) => i % 2 === 0).slice(0, 6), ...L.left.slice(0, 3), ...L.bottom.filter((_, i) => i % 2 === 0).slice(0, 10)].map((l) => l.pos);
   for (const pos of stripPos) assert.ok(f.some((l) => l.pos === pos), `strip LED ${pos} missing`);
-  const topLed = f.find((l) => l.pos === L.top[3].pos);
+  const topLed = f.find((l) => l.pos === L.top[4].pos);
   assert.deepEqual([topLed.r, topLed.g, topLed.b], [0, 255, 0], 'the strip colour, not the limb colour');
   const hand = f.find((l) => l.pos === L.middle[3].pos);
   assert.deepEqual([hand.r, hand.g, hand.b], [0, 255, 255], 'a limb inside the field is still shown');
@@ -139,4 +138,35 @@ test('even completely full status strips leave room for targets and limbs', () =
   const f = composeWall(L, { holdLeds: targets, hud: full });
   assert.ok(f.length <= MAX_GAME_LEDS);
   for (const t of targets) assert.ok(f.some((l) => l.pos === t.pos), 'target kept');
+});
+
+test('body: the stick figure is dim, a figure LED inside an obstacle shows the overlap colour, limbs and targets stay on top', () => {
+  const dim = { r: 0, g: 48, b: 150 }, magenta = { r: 255, g: 0, b: 200 }, red = { r: 255, g: 0, b: 0 };
+  const figure = L.rows[8].slice(5, 10).map((l) => l.pos);                 // five LEDs in a row
+  const zone = [{ x0: L.rows[8][7].x - 5, x1: L.rows[8][11].x + 5, y0: L.rows[8][7].y - 15, y1: L.rows[8][7].y + 15, color: red }];
+  const f = composeWall(L, { zones: zone, body: { leds: figure, color: dim, overlapColor: magenta }, limbLeds: [{ pos: figure[0], color: { r: 0, g: 255, b: 255 } }] });
+  const at = (i) => f.find((l) => l.pos === figure[i]);
+  assert.deepEqual([at(1).r, at(1).g, at(1).b], [0, 48, 150], 'outside the obstacle: dim blue');
+  assert.deepEqual([at(2).r, at(2).g, at(2).b], [255, 0, 200], 'inside: the overlap colour');
+  assert.deepEqual([at(0).r, at(0).g, at(0).b], [0, 255, 255], 'a hand beats the figure');
+  const redOnly = f.filter((l) => l.r === 255 && l.g === 0 && l.b === 0);
+  assert.ok(redOnly.length >= 1, 'the rest of the obstacle is red');
+  assert.equal(composeWall(L, { body: { leds: L.top.map((l) => l.pos), color: dim } }).length, 0, 'the figure never paints the status strips');
+  const hudOff = composeWall(L, { body: { leds: L.top.map((l) => l.pos), color: dim } }, { hudOn: false });
+  assert.equal(hudOff.length, 24, 'but may when the strips are off');
+});
+
+test('marks light every LED within their radius, with target priority; the lost effect is one dim row', () => {
+  const c = L.middle[6], mark = { x: c.x, y: c.y, r: 30, color: { r: 255, g: 0, b: 255 } };
+  const f = composeWall(L, { marks: [mark], zones: [{ x0: 0, x1: 5000, y0: c.y - 5, y1: c.y + 5, color: { r: 255, g: 0, b: 0 } }] });
+  const hit = f.find((l) => l.pos === c.pos);
+  assert.deepEqual([hit.r, hit.g, hit.b], [255, 0, 255], 'the mark wins over the zone');
+  assert.ok(f.filter((l) => l.b === 255).length >= 1);
+  const lost = composeWall(L, { fx: { kind: 'lost' }, marks: [mark] });
+  assert.ok(lost.length >= 24 && lost.length <= 25);
+  assert.ok(lost.every((l) => l.r === 120 && l.g === 50 && l.b === 0));
+});
+
+test('layout exposes the LED spacing in px', () => {
+  assert.ok(Math.abs(L.pitchX - 39) < 4 && Math.abs(L.pitchY - 39) < 4, `${L.pitchX} x ${L.pitchY}`);
 });

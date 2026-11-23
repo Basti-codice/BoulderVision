@@ -262,17 +262,27 @@ const games = await page.evaluate(async () => {
   out.coinsNoHud = { board: a.world.lit.size, coins: a.game.coins.length };
   await a.stopGame(); await wait(500);
   a.setGameOpts({ hud: true });
-  a.startGame('dodge'); await wait(6200);
-  out.dodge = { phase: a.game.state(performance.now()).phase, bars: a.game.bars.length, zones: a.showZones?.length ?? 0, screen: a.showLit?.size ?? 0, board: a.world.lit.size };
+  a.startGame('dodge'); await wait(6500);
+  out.dodge = { phase: a.game.state().phase, rows: a.game.rows.length, zones: a.showZones?.length ?? 0, board: a.world.lit.size, bodyLeds: a.games.boneLeds?.size ?? 0, tracked: a.games.body?.tracked ?? false, lives: a.game.lives };
   return out;
 });
 await shot('06c-dodge-on-wall');
 games.afterStop2 = await page.evaluate(async () => { const a = window.__bv; await a.stopGame(); await new Promise((r) => setTimeout(r, 700)); return a.world.lit.size; });
+const chase = await page.evaluate(async () => {
+  const a = window.__bv, wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  a.startGame('chaser'); await wait(6000);
+  const g = a.game, out = { phase: g.state().phase, hunter: !!g.hunter, marks: g.output().marks.length, board: a.world.lit.size, lives: g.lives };
+  await a.stopGame(); await wait(600);
+  out.after = a.world.lit.size;
+  return out;
+});
+console.log('   chaser', JSON.stringify(chase));
+check('chaser game: the hunter is a light on the wall, everything off afterwards', chase.phase === 'running' && chase.hunter && chase.marks === 1 && chase.board >= 10 && chase.after === 0, JSON.stringify(chase));
 console.log('   games', JSON.stringify(games));
 check('game countdown is shown on the wall (one row of LEDs)', games.countdown.fx === 'countdown' && games.countdown.board >= 10 && games.countdown.board <= 30, JSON.stringify(games.countdown));
 check('coins game: coins plus the status strips on the wall', games.coins.phase === 'running' && games.coins.coins === 2 && games.coins.screen === 2 && games.coins.onWall && games.coins.hudOn && games.coins.board >= 10 && games.coins.board <= 64 && games.coins.dots >= games.coins.board - 2, JSON.stringify(games.coins));
 check('coins game without status strips: the coins and the limbs only', games.coinsNoHud.board >= 1 && games.coinsNoHud.board <= 7, JSON.stringify(games.coinsNoHud));
-check('dodge game: bars on the wall (areas, not only holds), lives on the top edge', games.dodge.phase === 'running' && games.dodge.bars >= 1 && games.dodge.zones >= 1 && games.dodge.board >= 10 && games.dodge.board <= 64, JSON.stringify(games.dodge));
+check('dodge game: rows and the stick figure on the wall (areas, not only holds), lives on the top edge', games.dodge.phase === 'running' && games.dodge.rows >= 1 && games.dodge.zones >= 1 && games.dodge.tracked && games.dodge.bodyLeds >= 6 && games.dodge.board >= 15 && games.dodge.board <= 64, JSON.stringify(games.dodge));
 check('stopping a game switches the board off', games.afterStop === 0 && games.afterStop2 === 0);
 await shot('06b-game');
 // --- games area (own mode), wall test, responsiveness menu, latency stats

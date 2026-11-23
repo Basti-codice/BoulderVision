@@ -32,11 +32,12 @@ export class WallTest {
   get over() { return this.phase === 'over'; }
   start(now) { this.startedAt = now; this.clock = now; this.phase = 'running'; }
   update(now) { this.clock = now; if (this.phase === 'running' && now - this.startedAt >= TOTAL_MS) this.phase = 'over'; }
+  get showsBody() { return false; }
   get lit() { return new Map(); }
   get flashLit() { return new Map(); }
 
   output(now) {
-    const t = Math.max(0, now - this.startedAt), out = { lit: new Map(), flash: new Map(), zones: [], hud: null, fx: null };
+    const t = Math.max(0, now - this.startedAt), out = { lit: new Map(), flash: new Map(), zones: [], marks: [], bodyTint: null, hud: null, fx: null };
     const sweepAt = TOTAL_MS - SWEEP_MAX_MS;
     if (this.phase === 'over' || t >= sweepAt) {
       out.fx = { kind: 'sweep', color: COLORS.coin, t: Math.max(0, (t - sweepAt) / 1000) };
