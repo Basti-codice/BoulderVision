@@ -288,11 +288,14 @@ export class BodyModel {
   /**
    * Min distance in px from p to any part's surface (0 inside), Infinity without parts.
    * @param {{x:number,y:number}} p
+   * @param {Set<string>|string[]|null} [kinds] only parts of these kinds count (e.g. ['torso','head']); default all
    */
-  distanceTo(p) {
+  distanceTo(p, kinds = null) {
     if (!p || !fin(p.x) || !fin(p.y)) return Infinity;
+    const only = kinds ? (kinds instanceof Set ? kinds : new Set(kinds)) : null;
     let best = Infinity;
     for (const c of this._parts) {
+      if (only && !only.has(c.kind)) continue;
       const d = Math.sqrt(segDist2(p.x, p.y, c.a.x, c.a.y, c.b.x, c.b.y)) - c.r;
       if (d < best) best = d;
     }

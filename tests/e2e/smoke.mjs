@@ -280,9 +280,9 @@ console.log('   chaser', JSON.stringify(chase));
 check('chaser game: the hunter is a light on the wall, everything off afterwards', chase.phase === 'running' && chase.hunter && chase.marks === 1 && chase.board >= 10 && chase.after === 0, JSON.stringify(chase));
 console.log('   games', JSON.stringify(games));
 check('game countdown is shown on the wall (one row of LEDs)', games.countdown.fx === 'countdown' && games.countdown.board >= 10 && games.countdown.board <= 30, JSON.stringify(games.countdown));
-check('coins game: coins plus the status strips on the wall', games.coins.phase === 'running' && games.coins.coins === 2 && games.coins.screen === 2 && games.coins.onWall && games.coins.hudOn && games.coins.board >= 10 && games.coins.board <= 64 && games.coins.dots >= games.coins.board - 2, JSON.stringify(games.coins));
+check('coins game: coins plus the status strips on the wall', games.coins.phase === 'running' && games.coins.coins === 2 && games.coins.screen === 2 && games.coins.onWall && games.coins.hudOn && games.coins.board >= 10 && games.coins.board <= 72 && games.coins.dots >= games.coins.board - 2, JSON.stringify(games.coins));
 check('coins game without status strips: the coins and the limbs only', games.coinsNoHud.board >= 1 && games.coinsNoHud.board <= 7, JSON.stringify(games.coinsNoHud));
-check('dodge game: rows and the stick figure on the wall (areas, not only holds), lives on the top edge', games.dodge.phase === 'running' && games.dodge.rows >= 1 && games.dodge.zones >= 1 && games.dodge.tracked && games.dodge.bodyLeds >= 6 && games.dodge.board >= 15 && games.dodge.board <= 64, JSON.stringify(games.dodge));
+check('dodge game: rows and the stick figure on the wall (areas, not only holds), lives on the top edge', games.dodge.phase === 'running' && games.dodge.rows >= 1 && games.dodge.zones >= 1 && games.dodge.tracked && games.dodge.bodyLeds >= 6 && games.dodge.board >= 15 && games.dodge.board <= 72, JSON.stringify(games.dodge));
 check('stopping a game switches the board off', games.afterStop === 0 && games.afterStop2 === 0);
 await shot('06b-game');
 // --- games area (own mode), wall test, responsiveness menu, latency stats

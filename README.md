@@ -58,20 +58,21 @@ Run the Holds step first: the scan assigns LEDs to detected holds.
 * **Export**: annotated image (PNG with numbered holds), hold list (CSV), hold map (JSON with LED map), and the complete
   board file (re-importable from the profile menu).
 
-## Games (Live mode)
+## Games (own "Games" area)
 
-Two small games for testing the whole chain (camera, contacts, board): **Coins** (grab lit coin holds with your hands, quick
-grabs build a combo, golden coins every fifth, 60 s) and **Dodge** (red bars fall from the top, announced by a dim warning,
-never cover more than the difficulty's share of the width, speed grows; staying on a red hold costs a life after a short grace
-time, then a shield). Difficulty: easy / medium / hard.
+Three games use the whole body and the hand/foot contacts: **Coins** (grab lit coin holds with your hands, combo, golden coins),
+**Dodge** (rows of red blocks fall from the top, announced by a dim warning; every row has a free lane the whole body fits through,
+the lane wanders from row to row but never further than a climber can follow; any body part in a block costs a life after a short
+grace time and the lane narrows over time) and **Chaser** (a purple light hunts the body across the wall, takes a breather every few
+seconds, a green hold freezes it). Easy / medium / hard; records per game and difficulty.
 
-Everything is shown **on the wall**, not only on screen (the screen is mirrored): targets, the bars (every LED inside a bar
-lights, with or without a hold), a countdown (one row of LEDs, red / orange / yellow, then a green flash), and a game-over
-sweep. Optional status strips (setting *Show time, lives and score on the wall*): top row = time bar (Coins) / lives (Dodge),
-left column = combo (Coins) / speed (Dodge), bottom row = score ticks (one LED per point, a second lap changes colour). The holds
-on those strips are not part of the game. Only holds that have an LED are played, so no target or trap is ever invisible. A frame
-lights at most 64 LEDs (one Bluetooth message, safe current). Without a connected board the game runs on screen only.
-The rules live in `src/game/games.js`, the wall rendering in `src/game/wallhud.js` (both pure, unit tested).
+Everything is shown **on the wall**, the screen only mirrors it: targets, obstacles (every LED inside a block lights, with or without
+a hold), the hunter, your **body as a dim blue stick figure** (hands and feet keep cyan / orange, a body LED inside a block turns
+yellow), a countdown, a game-over sweep, and optional status strips (top row lives / time, bottom row score). The game clock stops
+when the climber is not tracked (a lost pose never costs a life; the wall shows a dim row meanwhile). Only holds that have an LED are
+played. A frame lights at most 72 LEDs (one Bluetooth message, safe current); the status strips have their own budget, the figure
+comes before announcements. *Wall check* plays every display once without climbing. Without a connected board the games run on screen only.
+The rules live in `src/game/games.js`, the body in `src/game/body.js`, the wall rendering in `src/game/wallhud.js` (all pure, unit tested).
 
 ## Debug report
 

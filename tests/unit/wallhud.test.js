@@ -170,3 +170,17 @@ test('marks light every LED within their radius, with target priority; the lost 
 test('layout exposes the LED spacing in px', () => {
   assert.ok(Math.abs(L.pitchX - 39) < 4 && Math.abs(L.pitchY - 39) < 4, `${L.pitchX} x ${L.pitchY}`);
 });
+
+test('announced rows (soft zones) never show the touching colour and give way to the figure when the frame is full', () => {
+  const dim = { r: 0, g: 48, b: 150 }, yellow = { r: 255, g: 255, b: 0 }, warn = { r: 110, g: 40, b: 0 }, red = { r: 255, g: 0, b: 0 };
+  const figure = L.rows[8].slice(5, 10).map((l) => l.pos);
+  const soft = [{ x0: 0, x1: 5000, y0: L.rows[8][7].y - 15, y1: L.rows[8][7].y + 15, color: warn, soft: true }];
+  const f = composeWall(L, { zones: soft, body: { leds: figure, color: dim, overlapColor: yellow } });
+  for (const pos of figure) { const l = f.find((x) => x.pos === pos); assert.deepEqual([l.r, l.g, l.b], [0, 48, 150], 'the figure keeps its colour inside an announced row'); }
+  // a full frame: lots of hard zone, the figure, lots of soft zone -> the figure is complete, the soft rows are cut
+  const many = L.rows.slice(2, 22).flatMap((r) => r.slice(2, 14));
+  const wide = composeWall(L, { zones: [{ x0: 0, x1: 5000, y0: L.rows[12][0].y - 15, y1: L.rows[12][0].y + 15, color: red }, { x0: 0, x1: 5000, y0: 0, y1: 5000, color: warn, soft: true }], body: { leds: many.slice(0, 30).map((l) => l.pos), color: dim, overlapColor: yellow } });
+  assert.equal(wide.length, MAX_GAME_LEDS);
+  const bodyLit = wide.filter((l) => l.r === 0 && l.g === 48 && l.b === 150).length + wide.filter((l) => l.r === 255 && l.g === 255 && l.b === 0).length;
+  assert.ok(bodyLit >= 28, `the figure is drawn almost completely (${bodyLit} of 30)`);
+});

@@ -66,7 +66,7 @@ class App {
     this.serial = new SerialSink((state, detail = '') => this.set({ outputs: { ...this.s.outputs, serial: { state, detail } } }));
     this.bus.on((m) => { this.recorder.handle(m); this.ws.handle(m); this.serial.handle(m); this.kilterSink?.handle(m); });
     this.meter = new LatencyMeter(); this._lastStepAt = 0; this._timingAt = 0; this._filterOpts = resolveContact(this.s.live.contact).filter;
-    this.showLit = null; this.showZones = null; this.showLeds = null; this.game = null; this.games = new GamesController(this); this._ledSig = null; this._ledNext = null; this._ledBusy = false;
+    this.showLit = null; this.showZones = null; this.showMarks = null; this.showLeds = null; this.game = null; this.games = new GamesController(this); this._ledSig = null; this._ledNext = null; this._ledBusy = false;
     this.source.addEventListener('change', () => this._camChanged());
     this._lastUi = 0;
   }

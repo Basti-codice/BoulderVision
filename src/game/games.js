@@ -33,10 +33,10 @@ export const COLORS = {
   timeLow: { r: 255, g: 200, b: 0 },
   record: { r: 0, g: 255, b: 0 },
   body: { r: 0, g: 48, b: 150 },         // the stick figure: dim blue (hands and feet keep cyan / orange on top)
-  overlap: { r: 255, g: 0, b: 200 },     // a body LED inside an obstacle: you are touching it
+  overlap: { r: 255, g: 255, b: 0 },     // a body LED inside an obstacle: you are touching it (yellow: distinct from red, hunter and hand colours on the 3-3-2 board)
   hunter: { r: 255, g: 0, b: 255 },
   hunterFrozen: { r: 90, g: 0, b: 110 },
-  freeze: { r: 0, g: 255, b: 150 },
+  freeze: { r: 120, g: 255, b: 0 },      // lime: neither the green flash nor the cyan of a hand
 };
 
 /**
@@ -64,6 +64,8 @@ const NO_CONTACTS = { LH: null, RH: null, LF: null, RF: null };
 
 /** The game clock stops when the climber has not been tracked for this long. */
 export const TRACKING_GRACE_MS = 1500;
+/** A gap between two updates longer than this (hidden tab, stalled loop) does not count as game time. */
+export const MAX_FRAME_GAP_MS = 250;
 
 /** Per difficulty. Medium is the reference. */
 const COINS_LEVELS = {
@@ -87,35 +89,43 @@ const COINS = {
  * can get (comfortCmS) before the row arrives.
  */
 const DODGE_LEVELS = {
-  easy:   { lives: 5, startSpeedCm: 10, speedGainCm: 0.15, maxSpeedCm: 22, thicknessCm: 18, laneCm: 150, bodyCm: 75, comfortCmS: 15, spacingCm: 170, warnMs: 2500, graceMs: 900, maxBlocks: 2, blockMinCm: 50, blockMaxCm: 100, shrinkCm: 6 },
-  medium: { lives: 3, startSpeedCm: 14, speedGainCm: 0.2,  maxSpeedCm: 30, thicknessCm: 18, laneCm: 125, bodyCm: 75, comfortCmS: 22, spacingCm: 150, warnMs: 1800, graceMs: 700, maxBlocks: 3, blockMinCm: 50, blockMaxCm: 110, shrinkCm: 4 },
-  hard:   { lives: 3, startSpeedCm: 18, speedGainCm: 0.3,  maxSpeedCm: 40, thicknessCm: 20, laneCm: 105, bodyCm: 75, comfortCmS: 30, spacingCm: 130, warnMs: 1200, graceMs: 500, maxBlocks: 3, blockMinCm: 50, blockMaxCm: 120, shrinkCm: 3 },
+  // laneCm: lane width at the start, narrowing by laneShrinkCmS per second of play down to bodyCm + laneMarginCm (the body measured wider than bodyCm widens it)
+  easy:   { lives: 5, startSpeedCm: 10, speedGainCm: 0.3,  maxSpeedCm: 24, thicknessCm: 18, laneCm: 150, laneShrinkCmS: 0.15, laneMarginCm: 40, bodyCm: 75, comfortCmS: 15, spacingCm: 140, warnMs: 2500, graceMs: 900, maxBlocks: 2, blockMinCm: 50, blockMaxCm: 100, shrinkCm: 6 },
+  medium: { lives: 3, startSpeedCm: 14, speedGainCm: 0.4,  maxSpeedCm: 32, thicknessCm: 18, laneCm: 125, laneShrinkCmS: 0.2,  laneMarginCm: 30, bodyCm: 75, comfortCmS: 22, spacingCm: 120, warnMs: 1800, graceMs: 700, maxBlocks: 3, blockMinCm: 50, blockMaxCm: 110, shrinkCm: 4 },
+  hard:   { lives: 3, startSpeedCm: 18, speedGainCm: 0.6,  maxSpeedCm: 42, thicknessCm: 20, laneCm: 110, laneShrinkCmS: 0.2,  laneMarginCm: 25, bodyCm: 75, comfortCmS: 30, spacingCm: 105, warnMs: 1200, graceMs: 500, maxBlocks: 3, blockMinCm: 50, blockMaxCm: 120, shrinkCm: 3 },
 };
 const DODGE = {
   countdown: 3_000,
   invulnerableMs: 1_500,    // after a hit nothing else can cost a life for this long
   hitFlash: 600,
-  secondsPerTick: 5,        // one LED of the score row per this many seconds survived
-  laneMarginCm: 40,         // the lane is at least this much wider than the measured body
+  secondsPerTick: 10,       // one LED of the score row per this many seconds survived
   firstRowMs: 1_000,        // the first row appears this long after the start
-  reactMs: 2_500,           // a row never covers the climber's current column if it reaches the climber sooner than this
+  reactMs: 3_000,           // a row never covers the climber's current column if it reaches the climber sooner than this
+  humanReactS: 0.6,         // the lane planner assumes the climber starts moving this long after the warning
+  maxBodyCm: 170,           // widest body the lane adapts to
 };
 
-/** Chaser. The hunter flies towards the body; catching any body part costs a life, then it restarts far away. */
+/**
+ * Chaser. The hunter flies towards the body centre; reaching the core of the body (torso, head) costs a life, then it restarts far
+ * away and rests. It pauses for a moment every few seconds, which is the climber's chance to get away, and a green hold freezes it.
+ * Its top speed stays below what a climber can keep up for a while (a hand-to-hand move of 60-80 cm takes 1.5-3 s).
+ */
 const CHASER_LEVELS = {
-  easy:   { lives: 5, startSpeedCm: 5, speedGainCm: 0.12, maxSpeedCm: 14, catchCm: 9,  graceMs: 300, freezeMs: 5_000 },
-  medium: { lives: 3, startSpeedCm: 7, speedGainCm: 0.18, maxSpeedCm: 20, catchCm: 10, graceMs: 250, freezeMs: 4_000 },
-  hard:   { lives: 3, startSpeedCm: 9, speedGainCm: 0.25, maxSpeedCm: 27, catchCm: 12, graceMs: 200, freezeMs: 3_000 },
+  easy:   { lives: 5, startSpeedCm: 4,   speedGainCm: 0.06, maxSpeedCm: 9,  catchCm: 9,  graceMs: 300, freezeMs: 5_000, dashMs: 5_000, pauseMs: 1_500 },
+  medium: { lives: 3, startSpeedCm: 5,   speedGainCm: 0.09, maxSpeedCm: 12, catchCm: 10, graceMs: 250, freezeMs: 4_000, dashMs: 5_000, pauseMs: 1_200 },
+  hard:   { lives: 3, startSpeedCm: 6.5, speedGainCm: 0.12, maxSpeedCm: 16, catchCm: 12, graceMs: 200, freezeMs: 3_000, dashMs: 5_000, pauseMs: 1_000 },
 };
 const CHASER = {
   countdown: 3_000,
   invulnerableMs: 2_500,    // after a catch the hunter restarts far away and rests this long
+  spawnRestMs: 1_500,
   hitFlash: 600,
-  secondsPerTick: 5,
+  secondsPerTick: 10,
   pickupEveryMs: 12_000,    // a freeze hold appears this often (when none is lit)
   pickupTtlMs: 14_000,
   pickupReachMinCm: 40,
   pickupReachMaxCm: 120,
+  catchKinds: ['torso', 'head'],  // a trailing foot or hand cannot be caught: the climber can always get the legs out of the way
 };
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -133,6 +143,7 @@ class Game {
    * @param {() => number} rand uniform random in [0,1)
    */
   constructor(holds, wall, rand) {
+    if (!(wall.pxPerCm > 0)) throw new Error('A game needs the wall scale (pxPerCm)');
     this.holds = holds;
     this.byId = new Map(holds.map((h) => [h.id, h]));
     this.wall = wall;
@@ -152,15 +163,17 @@ class Game {
   get over() { return this.phase === 'over'; }
   /** Does the wall show the climber's stick figure? (costs LEDs: only where the body matters) */
   get showsBody() { return false; }
+  /** Does the game need the body model (pauses when the torso is lost)? Otherwise "a person is seen" is enough. */
+  get needsBody() { return false; }
   cm(px) { return px / this.wall.pxPerCm; }
   px(cm) { return cm * this.wall.pxPerCm; }
   start(now) { this.lastNow = now; this.t = 0; this.phase = 'ready'; }
   /** Advance the game clock by the real time since the last call, unless tracking has been lost for a while. Returns the game dt (ms). */
   advance(now, tracked) {
-    const dt = this.lastNow == null ? 0 : Math.max(0, now - this.lastNow);
+    const gap = this.lastNow == null ? 0 : Math.max(0, now - this.lastNow), dt = gap > MAX_FRAME_GAP_MS ? 0 : gap;
     this.lastNow = now;
     if (tracked) this.lostSince = null; else this.lostSince ??= now;
-    this.paused = !tracked && now - this.lostSince > TRACKING_GRACE_MS;
+    this.paused = this.phase !== 'over' && !tracked && now - this.lostSince > TRACKING_GRACE_MS; // the game-over sweep always finishes
     if (!this.paused) this.t += dt;
     return this.paused ? 0 : dt;
   }
@@ -175,11 +188,11 @@ class Game {
   }
   remember(contacts) { for (const l of LIMBS) this.prev[l] = contacts[l] ?? null; }
   /** A playable hold at a reachable distance from the hands (or from the middle of the wall when nothing is held), not in `taken`. */
-  pickHold(contacts, taken, minCm, maxCm) {
+  pickHold(contacts, taken, minCm, maxCm, around = null) {
     const hands = HAND_LIMBS.map((l) => this.byId.get(contacts[l])).filter(Boolean);
     const ref = hands.length
       ? { x: hands.reduce((s, h) => s + h.cx, 0) / hands.length, y: hands.reduce((s, h) => s + h.cy, 0) / hands.length }
-      : { x: this.wall.RW / 2, y: this.wall.RH * 0.55 };
+      : around ?? { x: this.wall.RW / 2, y: this.wall.RH * 0.55 };
     const free = this.holds.filter((h) => !taken.has(h.id));
     const reachable = free.filter((h) => { const d = this.cm(dist(ref, { x: h.cx, y: h.cy })); return d >= minCm && d <= maxCm; });
     const pool = reachable.length ? reachable : free;
@@ -220,7 +233,7 @@ export class CoinGame extends Game {
       if (t - this.runStart >= this.cfg.duration) this.finish();
       else {
         this.coins = this.coins.filter((c) => t - c.spawnedAt < this.cfg.ttl);
-        if (this.coins.length === 0 && this.combo > 1 && t - this.lastGrab > this.cfg.comboWindow) this.combo = 1;
+        if (this.combo > 1 && t - this.lastGrab > this.cfg.comboWindow) this.combo = 1;   // the combo runs out when nothing was grabbed for a while
         for (const g of this.grabs(contacts)) {
           if (!HAND_LIMBS.includes(g.limb)) continue;
           const i = this.coins.findIndex((c) => c.holdId === g.holdId);
@@ -305,31 +318,35 @@ export class DodgeGame extends Game {
   }
 
   get showsBody() { return true; }
+  get needsBody() { return true; }
   speedCm() { return Math.min(this.cfg.maxSpeedCm, this.cfg.startSpeedCm + this.cfg.speedGainCm * this.survived); }
   /** Bar thickness in px: at least about 1.15 LED rows, so that every row of LEDs is passed (never skipped between two rows). */
   get thicknessPx() { return Math.max(this.px(this.cfg.thicknessCm), 1.15 * (this.wall.rowPitchPx || 0)); }
   get halfRow() { return this.thicknessPx / 2; }
 
-  /** Lane width: the configured one, widened when the measured body is wider than assumed. */
-  _laneCm() { return Math.max(this.cfg.laneCm, this.bodyCm + this.cfg.laneMarginCm); }
+  /** Lane width: the configured one narrowing over time, never less than the (measured) body plus a margin. */
+  _laneCm() { return Math.max(this.cfg.laneCm - this.cfg.laneShrinkCmS * this.survived, this.bodyCm + this.cfg.laneMarginCm); }
 
   /**
-   * The next row: where its lane is and which blocks it has. The lane moves by at most (laneCm - bodyCm) from the previous one,
-   * never ends up further from the climber than they can get before the row arrives, and stays inside the field. Blocks fill part of the space left and right of the lane, never in it.
+   * The next row: where its lane is and which blocks it has. The lane moves by at most (laneW - bodyW) from the previous one (so two
+   * rows on the body at the same time share a corridor the body fits through), stays inside the field, and - as far as that rule
+   * allows - never ends up further from the climber than they can get before the row arrives (comfortCmS, after a reaction time).
+   * When the climber was knocked far away from the lane the lane moves towards them by the maximum. Blocks fill part of the space
+   * left and right of the lane, never in it.
    */
   _planRow(body) {
-    const f = this.field, laneW = this.px(this._laneCm()), half = laneW / 2, speed = this.px(this.speedCm());
-    const minC = f.x0 + half, maxC = f.x1 - half;
+    const f = this.field, laneW = Math.min(this.px(this._laneCm()), f.x1 - f.x0), half = laneW / 2, speed = this.px(this.speedCm());
+    const minC = f.x0 + half, maxC = f.x1 - half, bodyPx = this.px(this.bodyCm);
     const anchor = body?.centre?.x ?? this.lane ?? (f.x0 + f.x1) / 2;
     const prev = this.lane ?? clamp(anchor, minC, maxC);
-    const maxShift = Math.max(0, laneW - this.px(this.bodyCm));
+    const maxShift = Math.max(0, laneW - bodyPx);
     const shift = (this.rand() * 2 - 1) * maxShift * (0.5 + 0.5 * this.rand());   // random walk: a climber who stands still is eventually left behind
-    // the climber must be able to reach the new lane before the row reaches them (also when they were knocked out of the old one)
+    // time the climber has before the row's lower edge reaches the top of their body, minus a reaction time
     const topOfBody = body?.bounds?.y0 ?? this.wall.RH / 2;
-    const arrivalS = this.cfg.warnMs / 1000 + Math.max(0, topOfBody - f.y0) / Math.max(1, speed);
-    const reach = this.px(this.cfg.comfortCmS) * arrivalS + Math.max(0, half - this.px(this.bodyCm) / 2);
-    let c = clamp(prev + shift, minC, maxC);
-    if (Math.abs(c - anchor) > reach) c = clamp(anchor + Math.sign(c - anchor) * reach, minC, maxC);
+    const arrivalS = Math.max(0, this.cfg.warnMs / 1000 + Math.max(0, topOfBody - f.y0 - this.thicknessPx) / Math.max(1, speed) - this.cfg.humanReactS);
+    const reach = this.px(this.cfg.comfortCmS) * arrivalS + Math.max(0, half - bodyPx / 2);
+    const lo = Math.max(prev - maxShift, anchor - reach, minC), hi = Math.min(prev + maxShift, anchor + reach, maxC);
+    const c = lo <= hi ? clamp(prev + shift, lo, hi) : clamp(clamp(anchor, prev - maxShift, prev + maxShift), minC, maxC);
     const lane = { x0: c - half, x1: c + half };
     return { lane, blocks: this._blocksAround(lane, body, arrivalS * 1000 < this.cfg.reactMs) };
   }
@@ -380,7 +397,7 @@ export class DodgeGame extends Game {
 
   update(now, arg) {
     const ctx = contextOf(arg), dt = this.advance(now, ctx.tracked) / 1000, t = this.t;
-    if (ctx.body?.bounds) this.bodyCm = clamp(this.cm(ctx.body.bounds.x1 - ctx.body.bounds.x0), this.cfg.bodyCm, 140);
+    if (ctx.body?.bounds) this.bodyCm = clamp(this.cm(ctx.body.bounds.x1 - ctx.body.bounds.x0), this.cfg.bodyCm, this.cfg.maxBodyCm);
     if (this.phase === 'ready' && t >= this.cfg.countdown) { this.phase = 'running'; this.runStart = t; this.nextRowAt = t + this.cfg.firstRowMs; }
     if (this.phase === 'running' && !this.paused) {
       this.survived = (t - this.runStart) / 1000;
@@ -389,7 +406,8 @@ export class DodgeGame extends Game {
         if (!r.live && t >= r.warnUntil) r.live = true;
         if (r.live) r.y += v * dt;
       }
-      this.rows = this.rows.filter((r) => r.y - this.halfRow < this.field.y1);
+      // a row leaves once its upper edge is below the last LED row: below that it would be deadly but invisible
+      this.rows = this.rows.filter((r) => r.y - this.halfRow < this.field.y1 - (this.wall.rowPitchPx || 0) / 2);
       if (t >= this.nextRowAt) {
         const row = this._planRow(ctx.body?.tracked ? ctx.body : null);
         this.lane = (row.lane.x0 + row.lane.x1) / 2;
@@ -400,7 +418,8 @@ export class DodgeGame extends Game {
       // any body part in a falling block gets a moment to get out (graceMs); one hit at a time, then a short shield
       if (this._touching(ctx)) {
         this.inBlockSince ??= t;
-        if (t - this.inBlockSince >= this.cfg.graceMs && t >= this.invulnerableUntil) {
+        // the grace time counts from the end of the shield: one block that stays on the climber costs a life per grace period, not per shield
+        if (t - Math.max(this.inBlockSince, this.invulnerableUntil) >= this.cfg.graceMs) {
           this.lives--;
           this.invulnerableUntil = t + this.cfg.invulnerableMs;
           this.hitUntil = t + this.cfg.hitFlash;
@@ -427,19 +446,19 @@ export class DodgeGame extends Game {
   get zones() {
     if (this.phase !== 'running') return [];
     const half = this.halfRow, out = [];
-    for (const live of [true, false]) for (const r of this.rows) if (r.live === live) for (const b of r.blocks) out.push({ x0: b.x0, x1: b.x1, y0: r.y - half, y1: r.y + half, color: live ? COLORS.danger : COLORS.warn });
+    for (const live of [true, false]) for (const r of this.rows) if (r.live === live) for (const b of r.blocks) out.push({ x0: b.x0, x1: b.x1, y0: r.y - half, y1: r.y + half, color: live ? COLORS.danger : COLORS.warn, soft: !live });
     return out;
   }
 
   output() {
     return {
       lit: this.lit,
+      wallLit: new Map(),      // the obstacles are areas on the wall (zones): no extra hold colours that would hide the overlap colour
       flash: this.flashLit,
       zones: this.zones, marks: [],
       bodyTint: this.t < this.hitUntil ? COLORS.hit : null,
       hud: {
         top: { kind: 'segments', count: this.cfg.lives, lit: this.lives, color: COLORS.danger },
-        left: { kind: 'bar', value: this.speedCm() / this.cfg.maxSpeedCm, color: COLORS.speed },
         bottom: { kind: 'ticks', count: Math.floor(this.survived / this.cfg.secondsPerTick) },
       },
       fx: this.effect(this.cfg.countdown),
@@ -460,7 +479,8 @@ export class ChaserGame extends Game {
     this.sweepColor = COLORS.hunter;
     this.lives = this.cfg.lives;
     this.hunter = null;         // {x, y} in wall px, once running
-    this.restUntil = -Infinity; // it rests (frozen by a catch or by a pickup) until this game time
+    this.restUntil = -Infinity; // it rests (spawn, after a catch, a short breather, a freeze) until this game time
+    this.nextBreakAt = Infinity;
     this.frozenByPickup = false;
     this.invulnerableUntil = -Infinity;
     this.hitUntil = -Infinity;
@@ -473,20 +493,24 @@ export class ChaserGame extends Game {
   }
 
   get showsBody() { return true; }
+  get needsBody() { return true; }
   speedCm() { return Math.min(this.cfg.maxSpeedCm, this.cfg.startSpeedCm + this.cfg.speedGainCm * this.survived); }
-  /** Radius of the hunter's light: at least one LED of the lattice is always within it. */
-  get markRadiusPx() { return Math.max(this.px(8), 0.75 * Math.max(this.wall.rowPitchPx || 0, this.wall.colPitchPx || 0)); }
+  get _pitch() { return Math.max(this.wall.rowPitchPx || 0, this.wall.colPitchPx || 0); }
+  /** Radius of the hunter's light: with 0.9 x the LED spacing at least one LED of a lattice is always within it (the worst case is 0.71). */
+  get markRadiusPx() { return Math.max(this.px(8), 0.9 * this._pitch); }
 
-  /** Start position: the corner of the field (or its top middle) furthest from the climber. */
+  /** Start position: the corner of the field (or its top middle) furthest from the climber, half an LED spacing inside so it always lights an LED. */
   _spawnPoint(ref) {
-    const f = this.field, spots = [{ x: f.x0, y: f.y0 }, { x: f.x1, y: f.y0 }, { x: f.x0, y: f.y1 }, { x: f.x1, y: f.y1 }, { x: (f.x0 + f.x1) / 2, y: f.y0 }];
+    const f = this.field, inset = this._pitch / 2;
+    const x0 = f.x0 + inset, x1 = f.x1 - inset, y0 = f.y0 + inset, y1 = f.y1 - inset;
+    const spots = [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x0, y: y1 }, { x: x1, y: y1 }, { x: (x0 + x1) / 2, y: y0 }];
     const from = ref ?? { x: (f.x0 + f.x1) / 2, y: (f.y0 + f.y1) / 2 };
     return spots.reduce((best, s) => (dist(s, from) > dist(best, from) ? s : best));
   }
 
-  /** Distance (px) from the hunter to the climber's body surface; falls back to the hands' and feet's holds without a body. */
+  /** Distance (px) from the hunter to the core of the climber's body; falls back to the hands' and feet's holds without a body. */
   _distanceToClimber(ctx) {
-    if (ctx.body?.tracked) return ctx.body.distanceTo(this.hunter);
+    if (ctx.body?.tracked) return ctx.body.distanceTo(this.hunter, this.cfg.catchKinds);
     let d = Infinity;
     for (const id of this.held(ctx.contacts)) { const h = this.byId.get(id); if (h) d = Math.min(d, dist(this.hunter, { x: h.cx, y: h.cy })); }
     return d;
@@ -503,21 +527,23 @@ export class ChaserGame extends Game {
     if (this.phase === 'running' && !this.paused) {
       this.survived = (t - this.runStart) / 1000;
       const centre = this._climberCentre(ctx);
-      if (!this.hunter && centre) { this.hunter = this._spawnPoint(centre); this.restUntil = t + 1_500; }
+      if (!this.hunter && centre) { this.hunter = this._spawnPoint(centre); this.restUntil = t + this.cfg.spawnRestMs; this.nextBreakAt = this.restUntil + this.cfg.dashMs; }
       if (this.hunter) {
+        if (t >= this.restUntil) this.frozenByPickup = false;
+        if (t >= this.nextBreakAt && t >= this.restUntil) { this.restUntil = t + this.cfg.pauseMs; this.nextBreakAt = this.restUntil + this.cfg.dashMs; } // a breather: the climber's chance to get away
         if (centre && t >= this.restUntil) {          // hunt: straight at the climber, never outside the field
           const step = this.px(this.speedCm()) * dt, d = dist(this.hunter, centre);
           if (d > 1e-6) { const k = Math.min(1, step / d); this.hunter = { x: this.hunter.x + (centre.x - this.hunter.x) * k, y: this.hunter.y + (centre.y - this.hunter.y) * k }; }
           this.hunter = { x: clamp(this.hunter.x, this.field.x0, this.field.x1), y: clamp(this.hunter.y, this.field.y0, this.field.y1) };
         }
-        if (t >= this.restUntil) this.frozenByPickup = false;
         const near = this._distanceToClimber(ctx) <= this.px(this.cfg.catchCm);
-        if (near && t >= this.invulnerableUntil && t >= this.restUntil) {
+        if (t < this.invulnerableUntil || t < this.restUntil) this.inRangeSince = null;     // the grace time starts when it can catch again
+        else if (near) {
           this.inRangeSince ??= t;
           if (t - this.inRangeSince >= this.cfg.graceMs) this._caught(centre);
-        } else if (!near) this.inRangeSince = null;
+        } else this.inRangeSince = null;
       }
-      this._pickups(t, ctx);
+      this._pickups(t, ctx, centre);
       this.score = Math.floor(this.survived);
     }
     this.flashes = this.flashes.filter((f) => f.until > t);
@@ -530,16 +556,17 @@ export class ChaserGame extends Game {
     this.hitUntil = t + this.cfg.hitFlash;
     this.invulnerableUntil = t + this.cfg.invulnerableMs;
     this.restUntil = t + this.cfg.invulnerableMs;
+    this.nextBreakAt = this.restUntil + this.cfg.dashMs;
     this.inRangeSince = null;
     this.hunter = this._spawnPoint(centre);
     if (this.lives <= 0) this.finish();
   }
 
-  /** A freeze hold appears now and then; any limb on it freezes the hunter. */
-  _pickups(t, ctx) {
+  /** A freeze hold appears now and then (near the climber); any limb on it freezes the hunter. */
+  _pickups(t, ctx, centre) {
     if (this.pickup && t - this.pickup.spawnedAt > this.cfg.pickupTtlMs) { this.pickup = null; this.nextPickupAt = t + 3_000; }
     if (!this.pickup && t >= this.nextPickupAt) {
-      const h = this.pickHold(ctx.contacts, this.held(ctx.contacts), this.cfg.pickupReachMinCm, this.cfg.pickupReachMaxCm);
+      const h = this.pickHold(ctx.contacts, this.held(ctx.contacts), this.cfg.pickupReachMinCm, this.cfg.pickupReachMaxCm, centre);
       if (h) this.pickup = { holdId: h.id, spawnedAt: t };
     }
     if (this.pickup) {
@@ -548,6 +575,7 @@ export class ChaserGame extends Game {
         this.flashes.push({ holdId: g.holdId, until: t + 450 });
         this.pickup = null; this.nextPickupAt = t + this.cfg.pickupEveryMs; this.freezes++;
         this.restUntil = Math.max(this.restUntil, t + this.cfg.freezeMs); this.frozenByPickup = true;
+        this.nextBreakAt = Math.max(this.nextBreakAt, this.restUntil + this.cfg.dashMs);
         break;
       }
     }
@@ -577,7 +605,6 @@ export class ChaserGame extends Game {
       bodyTint: this.t < this.hitUntil ? COLORS.hit : null,
       hud: {
         top: { kind: 'segments', count: this.cfg.lives, lit: this.lives, color: COLORS.danger },
-        left: { kind: 'bar', value: this.speedCm() / this.cfg.maxSpeedCm, color: COLORS.hunter },
         bottom: { kind: 'ticks', count: Math.floor(this.survived / this.cfg.secondsPerTick) },
       },
       fx: this.effect(this.cfg.countdown),
@@ -585,7 +612,7 @@ export class ChaserGame extends Game {
   }
 
   state() {
-    return { phase: this.phase, paused: this.paused, score: this.score, lives: this.lives, maxLives: this.cfg.lives, countdown: this.countdownLeft(this.cfg.countdown), speedCm: Math.round(this.speedCm()), frozen: this.resting };
+    return { phase: this.phase, paused: this.paused, score: this.score, lives: this.lives, maxLives: this.cfg.lives, countdown: this.countdownLeft(this.cfg.countdown), speedCm: Math.round(this.speedCm()), frozen: this.frozenByPickup && this.resting };
   }
 }
 

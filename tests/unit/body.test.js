@@ -339,3 +339,15 @@ test('performance: hitsRect + boneLeds on 500 LEDs', () => {
   assert.ok(n > 0);
   assert.ok(ms < 600, `${ms.toFixed(1)} ms`);
 });
+
+test('distanceTo can be limited to some kinds of parts', () => {
+  const m = new BodyModel({ pxPerCm: 2.8 });
+  const j = Array.from({ length: 33 }, () => ({ x: 500, y: 500, v: 1 }));
+  const put = (i, x, y) => { j[i] = { x, y, v: 1 }; };
+  put(11, 450, 400); put(12, 550, 400); put(23, 460, 560); put(24, 540, 560); put(15, 300, 300); put(13, 380, 350); put(16, 700, 300); put(14, 620, 350);
+  for (let k = 0; k < 6; k++) m.update(k * 70, j);
+  const nearHand = { x: 300, y: 300 };
+  assert.ok(m.distanceTo(nearHand) < 40, 'a forearm is close');
+  assert.ok(m.distanceTo(nearHand, ['torso', 'head']) > 100, 'but the core is far');
+  assert.equal(m.distanceTo(nearHand, new Set(['nonsense'])), Infinity);
+});

@@ -124,7 +124,7 @@ export class GamesController {
   async stop(restoreSink = true) {
     const a = this.app;
     if (!a.game) return;
-    a.game = null; a.showLit = null; a.showZones = null; a.showLeds = null; this.layout = null;
+    a.game = null; a.showLit = null; a.showZones = null; a.showMarks = null; a.showLeds = null; this.layout = null;
     a.set({ game: { ...a.s.game, active: false, current: null, state: null } });
     await a._ledsOff();
     if (restoreSink && !a.game && a.s.live.running) a.kilterSink?.setEnabled(a.s.live.lightBoard && !!a.board?.connected);
@@ -170,17 +170,20 @@ export class GamesController {
     if (!g) return;
     const lb = a.liveBody;
     if (lb && lb.t !== this.bodyT) { this.bodyT = lb.t; this.body.update(lb.t, lb.joints); this.boneLeds = null; } // one body update per pose frame
-    const tracked = a.tracking ? this.body.trackedAt(now) : true;
-    g.update(now, { contacts: a.tracker?.contacts ?? NO_CONTACTS, body: this.body, tracked });
+    // the body counts only while its torso is really known right now (trackedAt, not "the model was updated once"); games that only
+    // use the hands (Coins) are happy with "a person is seen"
+    const bodyNow = a.tracking && this.body.trackedAt(now) && this.body.centre ? this.body : null;
+    const tracked = a.tracking ? (g.needsBody ? !!bodyNow : !!bodyNow || !!a.liveDraw?.person) : true;
+    g.update(now, { contacts: a.tracker?.contacts ?? NO_CONTACTS, body: bodyNow, tracked });
     if (g.over && !this.overSeen) this._finish(g);
     const out = g.output(now);
     let body;
-    if (g.showsBody && this.layout && this.body.tracked) {
+    if (g.showsBody && this.layout && bodyNow) {
       this.boneLeds ??= this.body.boneLeds(this.layout.leds, this.boneRadiusPx);
       body = { leds: this.boneLeds, color: out.bodyTint ?? COLORS.body, overlapColor: COLORS.overlap };
     }
-    const frame = composeWall(this.layout, { flashLeds: this._holdLeds(out.flash), limbLeds: this._limbLeds(), holdLeds: this._holdLeds(out.lit), marks: out.marks, zones: out.zones, body, hud: out.hud, fx: out.fx }, { hudOn: this.hud });
-    a.showLit = out.lit; a.showZones = out.zones;
+    const frame = composeWall(this.layout, { flashLeds: this._holdLeds(out.flash), limbLeds: this._limbLeds(), holdLeds: this._holdLeds(out.wallLit ?? out.lit), marks: out.marks, zones: out.zones, body, hud: out.hud, fx: out.fx }, { hudOn: this.hud });
+    a.showLit = out.lit; a.showZones = out.zones; a.showMarks = out.marks;
     a.showLeds = frame.map((l) => ({ ...l, x: this.ledAt.get(l.pos)?.x, y: this.ledAt.get(l.pos)?.y })).filter((l) => l.x != null);
     a._pushLeds(frame); // latest wins: a slow link never queues frames, identical frames are not resent
     if (now - this.uiAt >= UI_INTERVAL_MS || g.over) { this.uiAt = now; a.set({ game: { ...a.s.game, state: g.state(now) } }); }

@@ -189,6 +189,11 @@ export class Stage {
       for (const z of app.showZones) { const [x0, y0] = this.toScreen(v, z.x0, z.y0), [x1, y1] = this.toScreen(v, z.x1, z.y1); ctx.fillStyle = `rgba(${z.color.r},${z.color.g},${z.color.b},.22)`; ctx.fillRect(x0, y0, x1 - x0, y1 - y0); ctx.strokeStyle = `rgba(${z.color.r},${z.color.g},${z.color.b},.7)`; ctx.lineWidth = 1.5; ctx.strokeRect(x0, y0, x1 - x0, y1 - y0); }
       ctx.restore();
     }
+    if (app.showMarks?.length) {
+      ctx.save();
+      for (const m of app.showMarks) { const [x, y] = this.toScreen(v, m.x, m.y), r = m.r * v.k; ctx.beginPath(); ctx.arc(x, y, Math.max(8, r), 0, 7); ctx.fillStyle = `rgba(${m.color.r},${m.color.g},${m.color.b},.28)`; ctx.fill(); ctx.strokeStyle = `rgb(${m.color.r},${m.color.g},${m.color.b})`; ctx.lineWidth = 2; ctx.stroke(); }
+      ctx.restore();
+    }
     if (app.showLeds?.length) {
       ctx.save();
       for (const l of app.showLeds) { const [x, y] = this.toScreen(v, l.x, l.y); ctx.beginPath(); ctx.arc(x, y, 5, 0, 7); ctx.fillStyle = `rgb(${l.r},${l.g},${l.b})`; ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 8; ctx.fill(); }

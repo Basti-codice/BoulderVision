@@ -12,9 +12,9 @@
 // Bluetooth is slow and a bright LED field draws a lot of current, so a frame never holds more than MAX_GAME_LEDS.
 
 /** At most this many LEDs lit in one frame (one Bluetooth message, a safe current draw). */
-export const MAX_GAME_LEDS = 64;
+export const MAX_GAME_LEDS = 72;
 /** Even with full status strips this many LEDs stay for targets, limbs and obstacles (a full 24-LED field would otherwise starve them). */
-const FIELD_MIN_LEDS = 16;
+const FIELD_MIN_LEDS = 28;
 /** A row needs this many LEDs to count as a row of the field (junk LEDs at the border do not). */
 const MIN_ROW_LEDS = 8;
 const MIN_COLUMN_LEDS = 6;
@@ -72,7 +72,7 @@ export function buildLayout(leds, pxPerCm) {
   if (!pitchY || !pitchX) return empty;
   const rows = groupBy(byY, (l) => l.y, GROUP_GAP_FRACTION * pitchY).map((r) => r.sort((a, b) => a.x - b.x)).filter((r) => r.length >= MIN_ROW_LEDS);
   const cols = groupBy(byX, (l) => l.x, GROUP_GAP_FRACTION * pitchX).map((c) => c.sort((a, b) => a.y - b.y)).filter((c) => c.length >= MIN_COLUMN_LEDS);
-  if (rows.length < 3 || !cols.length) return { ...empty, rows };
+  if (rows.length < 3 || !cols.length) return { ...empty, rows, pitchX, pitchY };
   // the gaps between sorted values are shortened by the spread inside a row: the spacing is the distance between row (column) means
   const meanSpacing = (groups, key) => { const m = groups.map((g) => g.reduce((t, l) => t + l[key], 0) / g.length); const d = []; for (let i = 1; i < m.length; i++) d.push(m[i] - m[i - 1]); return median(d) || 0; };
   const rowPitch = meanSpacing(rows, 'y') || pitchY, colPitch = meanSpacing(cols, 'x') || pitchX;
@@ -150,6 +150,7 @@ const inMark = (l, m) => (l.x - m.x) ** 2 + (l.y - m.y) ** 2 <= m.r * m.r;
  * @param {object|null} layout from buildLayout (null: no LED map, only the target LEDs below)
  * @param {{flashLeds?, limbLeds?, holdLeds?: {pos:number, color:{r,g,b}}[], marks?: {x,y,r,color}[], zones?: {x0,y0,x1,y1,color}[],
  *          body?: {leds: Iterable<number>, color, overlapColor}, hud?: {top?,left?,bottom?}, fx?: object}} parts
+ *   zones with soft:true are announcements (a row about to fall): drawn after the body, never counted as touching.
  *   Priority, highest first: fx (replaces everything), flashLeds (a hit / a collected coin, short), limbLeds (the holds hands and
  *   feet are on, so nobody can claim the system saw something else), holdLeds (targets), marks (round things in wall px, e.g. a
  *   chaser: every LED within r lights), overlap (a body LED inside a zone: shows you are touching an obstacle), zones, body
@@ -178,15 +179,16 @@ export function composeWall(layout, parts, { hudOn = true, cap = MAX_GAME_LEDS }
   for (const t of parts.flashLeds || []) put(t.pos, t.color);
   for (const t of parts.limbLeds || []) if (!onStrip(t.pos)) put(t.pos, t.color); // a hand on a strip's hold must not look like part of the display
   for (const t of parts.holdLeds || []) put(t.pos, t.color);
-  const zoneAt = new Map();                                   // LED pos -> colour of the first zone it lies in
+  const zoneAt = new Map(), softAt = new Map();               // LED pos -> colour of the first zone it lies in (hard: obstacles; soft: announcements)
   if (layout) {
     for (const m of parts.marks || []) for (const l of layout.leds) if (!onStrip(l.pos) && inMark(l, m)) put(l.pos, m.color);
-    for (const z of parts.zones || []) for (const l of layout.leds) if (!onStrip(l.pos) && !zoneAt.has(l.pos) && inZone(l, z)) zoneAt.set(l.pos, z.color);
+    for (const z of parts.zones || []) { const into = z.soft ? softAt : zoneAt; for (const l of layout.leds) if (!onStrip(l.pos) && !into.has(l.pos) && inZone(l, z)) into.set(l.pos, z.color); }
   }
   const body = new Set(parts.body?.leds || []);
-  if (parts.body?.overlapColor) for (const pos of body) if (zoneAt.has(pos) && !onStrip(pos)) put(pos, parts.body.overlapColor);
+  if (parts.body?.overlapColor) for (const pos of body) if (zoneAt.has(pos) && !onStrip(pos)) put(pos, parts.body.overlapColor); // only real obstacles: an announced row cannot hurt
   for (const [pos, color] of zoneAt) put(pos, color);
-  for (const pos of body) if (!onStrip(pos)) put(pos, parts.body.color);
+  for (const pos of body) if (!onStrip(pos)) put(pos, parts.body.color);                                                       // the figure before the announcements: it must stay recognisable
+  for (const [pos, color] of softAt) put(pos, color);
   for (const [pos, c] of strips) if (!out.has(pos)) out.set(pos, c);
   return finish(out);
 }

@@ -15,9 +15,13 @@ function figure(cx = 500, cy = 500, PX = 2.8) {
   return j;
 }
 /** One pose frame at time t, then one game frame. */
-function tick(app, t, joints = figure()) { app.liveBody = { t, joints }; app.games.tick(t); }
+function tick(app, t, joints = figure()) {
+  let from = app.game?.lastNow ?? t;
+  // steps of at most 100 ms: the games ignore longer gaps (a real frame loop has none)
+  while (from + 100 < t) { from += 100; app.liveBody = { t: from, joints }; app.games.tick(from); }
+  app.liveBody = { t, joints }; app.games.tick(t);
+}
 
-// a 24 x 24 LED field, a hold on every LED except a few unmapped ones (no LED) and a ghost marker
 function makeApp({ connected = true, tracking = true } = {}) {
   const r = rng(5), leds = [], holds = [];
   let pos = 1, id = 1;
@@ -200,4 +204,28 @@ test('wall test: runs through every display once, within the LED cap, and ends',
   assert.ok(frames.filter(Array.isArray).some((f) => f.length >= 15), 'something real was shown');
   assert.equal(app.game.over, true);
   assert.equal(app.s.game.best['walltest:medium'], undefined, 'a practice run is no record');
+});
+
+test('a lost torso pauses games that need the body (Dodge, Chaser) but not Coins while a person is still seen', () => {
+  for (const [id, pauses] of [['coins', false], ['dodge', true], ['chaser', true]]) {
+    const { app } = makeApp();
+    app.games.start(id);
+    app.game.start(performance.now());
+    const t0 = app.game.lastNow;
+    tick(app, t0 + 3200);                                        // running
+    const handsOnly = figure().map((p, i) => ([11, 12, 23, 24].includes(i) ? { ...p, v: 0 } : p));   // no shoulders, no hips: no torso
+    app.liveDraw = { person: true };
+    for (let k = 1; k <= 40; k++) tick(app, t0 + 3200 + k * 100, handsOnly);                          // 4 s later
+    assert.equal(app.game.paused, pauses, `${id}: paused=${app.game.paused}`);
+  }
+});
+
+test('the hunter is also drawn on the screen mirror (marks), even without an LED field', () => {
+  const { app } = makeApp({ connected: false });
+  app.games.start('chaser');
+  app.game.start(performance.now());
+  const t0 = app.game.lastNow;
+  tick(app, t0 + 3300); tick(app, t0 + 3500);
+  assert.ok(app.showMarks?.length === 1, 'a mark for the screen');
+  assert.equal(app.showLeds.length, 0, 'no LED field: nothing for the wall');
 });
